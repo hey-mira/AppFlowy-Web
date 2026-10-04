@@ -344,6 +344,8 @@ export default defineConfig(async ({ command, mode }) => {
     },
 
     optimizeDeps: {
+      // Keep the SDK's module-relative Worker and WASM URLs intact.
+      exclude: ['@notion-formula/sdk'],
       include: [...VITE_OPTIMIZED_DEPENDENCIES],
     },
     css: {

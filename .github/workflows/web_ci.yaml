@@ -43,6 +43,9 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
      
+      - name: Prepare Notion Formula SDK
+        uses: ./.github/actions/setup-notion-formula
+
       - name: install frontend dependencies
         run: |
           pnpm install
@@ -76,6 +79,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Prepare Notion Formula SDK
+        uses: ./.github/actions/setup-notion-formula
 
       - name: Build Docker image (runtime env injection test)
         run: |

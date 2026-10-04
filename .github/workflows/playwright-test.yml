@@ -42,6 +42,8 @@ jobs:
       - uses: pnpm/action-setup@v2
         with:
           version: ${{ env.PNPM_VERSION }}
+      - name: Prepare Notion Formula SDK
+        uses: ./.github/actions/setup-notion-formula
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Install test browsers
@@ -91,6 +93,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
 
+      - name: Prepare Notion Formula SDK
+        uses: ./.github/actions/setup-notion-formula
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -229,6 +233,9 @@ jobs:
         uses: pnpm/action-setup@v2
         with:
           version: ${{ env.PNPM_VERSION }}
+
+      - name: Prepare Notion Formula SDK
+        uses: ./.github/actions/setup-notion-formula
 
       - name: Checkout AppFlowy-Cloud-Premium
         uses: actions/checkout@v4

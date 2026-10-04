@@ -12,6 +12,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.notion-formula-sdk/
+.notion-formula-build/
 dist/**
 deploy/dist/**
 dist-ssr

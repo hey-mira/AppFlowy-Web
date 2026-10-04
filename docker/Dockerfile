@@ -11,6 +11,8 @@ WORKDIR /app
 
 # Copy package files first for better layer caching
 COPY package.json pnpm-lock.yaml ./
+# Built with pnpm formula:prepare before docker build; the SDK has no runtime dependencies.
+COPY .notion-formula-sdk/ ./.notion-formula-sdk/
 
 # Enable corepack and install dependencies
 RUN corepack enable && \

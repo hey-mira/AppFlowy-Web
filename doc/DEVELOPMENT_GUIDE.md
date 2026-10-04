@@ -13,6 +13,30 @@ Before you begin, ensure you have:
 - **pnpm** ≥10.9.0  
 - **Docker & Docker Compose** (required for both modes)
 
+## Prepare the formula package
+
+This fork uses the Rust/WASM `@notion-formula/sdk`. Before the first dependency
+install, build the commit pinned in `scripts/notion-formula-source.json`:
+
+```sh
+# Requires Git, Node.js 20+, pnpm, Rust with wasm32-unknown-unknown, and wasm-pack.
+node scripts/prepare-notion-formula.mjs
+pnpm install --frozen-lockfile
+```
+
+CI uses Rust 1.95.0 and wasm-pack 0.12.1. Preparation fetches the pinned source
+without submodules and copies only the package manifest and `dist` into the
+ignored `.notion-formula-sdk` directory. Rust build artifacts are cached in
+`.notion-formula-build`. Run preparation again after changing the pin.
+
+For development across both repositories, pass a local notion-formula-rs checkout:
+`pnpm formula:prepare /path/to/notion-formula-rs`. When working from its AppFlowy
+example submodule, the parent's `just deps-appflowy` already stages the current SDK.
+
+Both Dockerfiles require the prepared SDK in the build context; run preparation
+before `docker build`. CI prepares it before dependency installation and Docker
+builds, and keys the package cache by the pinned source and preparation scripts.
+
 ## 🛠️ Development Mode Setup
 
 **Best for:** Local development, testing, and debugging individual services.
@@ -48,7 +72,8 @@ cp dev.env .env
 
 # Install dependencies and start
 corepack enable
-pnpm install
+pnpm formula:prepare
+pnpm install --frozen-lockfile
 pnpm run dev
 ```
 
@@ -114,7 +139,8 @@ cp deploy.env .env
 
 # Install dependencies and start
 corepack enable
-pnpm install
+pnpm formula:prepare
+pnpm install --frozen-lockfile
 pnpm run dev
 ```
 

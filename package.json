@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "formula:prepare": "node scripts/prepare-notion-formula.mjs",
     "dev": "vite",
     "dev:coverage": "cross-env COVERAGE=true vite",
     "dev:server": "bun deploy/server.ts",
@@ -55,6 +56,7 @@
     "build-storybook": "storybook build"
   },
   "dependencies": {
+    "@notion-formula/sdk": "link:./.notion-formula-sdk",
     "@appflowyinc/editor": "^0.1.13",
     "@atlaskit/pragmatic-drag-and-drop": "1.5.2",
     "@atlaskit/pragmatic-drag-and-drop-auto-scroll": "2.1.0",
