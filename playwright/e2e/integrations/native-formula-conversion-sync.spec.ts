@@ -100,3 +100,72 @@ test('a metadata load arriving after conversion cancellation installs no listene
   await expect(page.getByTestId('conversion-workers')).toHaveText('1');
   await expect(page.getByTestId('converted-alpha')).toHaveText('');
 });
+
+test('native Formula waits for a required cold Rollup row before publishing its complete sum', async ({ page }) => {
+  await page.getByRole('button', { name: 'Use cold related row', exact: true }).click();
+  await page.getByRole('button', { name: 'Open native Formula', exact: true }).click();
+  await expect(page.getByTestId('cold-row-returned')).toHaveText('true');
+  await expect(page.getByTestId('live-formula')).toHaveAttribute('data-state', 'pending');
+  await expect(page.getByTestId('live-formula')).toHaveText('');
+  await page.getByRole('button', { name: 'Hydrate related row', exact: true }).click();
+  await expect(page.getByTestId('live-formula')).toHaveAttribute('data-state', 'value');
+  await expect(page.getByTestId('live-formula')).toHaveText('28');
+  await page.getByRole('button', { name: 'Close native Formula', exact: true }).click();
+  await expect(page.getByTestId('cold-row-listeners')).toHaveText('0');
+  await expect(page.getByTestId('conversion-owners')).toHaveText('0');
+});
+
+test('permanent conversion waits for every required cold Rollup row before committing', async ({ page }) => {
+  await page.getByRole('button', { name: 'Use cold related row', exact: true }).click();
+  await page.getByRole('button', { name: 'Convert Formula to Number', exact: true }).click();
+  await expect(page.getByTestId('cold-row-returned')).toHaveText('true');
+  await expect(page.getByTestId('conversion-state')).toHaveText('pending');
+  await expect(page.getByTestId('stored-type')).toHaveText('Formula');
+  await expect(page.getByTestId('converted-alpha')).toHaveText('');
+  await page.getByRole('button', { name: 'Hydrate related row', exact: true }).click();
+  await expect(page.getByTestId('conversion-state')).toHaveText('converted');
+  await expect(page.getByTestId('converted-alpha')).toHaveText('28');
+  await expect(page.getByTestId('converted-beta')).toHaveText('16');
+  await expect(page.getByTestId('cold-row-listeners')).toHaveText('0');
+  await expect(page.getByTestId('conversion-owners')).toHaveText('0');
+});
+
+test('required cold Rollup row timeout is a host failure in a native Formula', async ({ page }) => {
+  await page.getByRole('button', { name: 'Use cold related row', exact: true }).click();
+  await page.getByRole('button', { name: 'Open native Formula', exact: true }).click();
+  await expect(page.getByTestId('cold-row-returned')).toHaveText('true');
+  await expect(page.getByTestId('live-formula')).toHaveAttribute('data-state', 'error');
+  await expect(page.getByTestId('live-formula')).toHaveAttribute('data-error-source', 'host');
+  await expect(page.getByTestId('live-formula')).toContainText('child-one');
+  await page.getByRole('button', { name: 'Close native Formula', exact: true }).click();
+  await expect(page.getByTestId('cold-row-listeners')).toHaveText('0');
+  await expect(page.getByTestId('conversion-owners')).toHaveText('0');
+});
+
+test('required cold Rollup row timeout refuses conversion and preserves all stored cells', async ({ page }) => {
+  await page.getByRole('button', { name: 'Use cold related row', exact: true }).click();
+  await page.getByRole('button', { name: 'Convert Formula to Number', exact: true }).click();
+  await expect(page.getByTestId('old-conversion-state')).toContainText('error:');
+  await expect(page.getByTestId('old-conversion-state')).toContainText('child-one');
+  await expect(page.getByTestId('stored-type')).toHaveText('Formula');
+  await expect(page.getByTestId('converted-alpha')).toHaveText('');
+  await expect(page.getByTestId('converted-beta')).toHaveText('');
+  await expect(page.getByTestId('cold-row-listeners')).toHaveText('0');
+  await expect(page.getByTestId('conversion-owners')).toHaveText('0');
+});
+
+test('cancelling conversion during required row hydration releases its waiting listener immediately', async ({
+  page,
+}) => {
+  await page.getByRole('button', { name: 'Use cold related row', exact: true }).click();
+  await page.getByRole('button', { name: 'Convert Formula to Number', exact: true }).click();
+  await expect(page.getByTestId('cold-row-returned')).toHaveText('true');
+  await expect(page.getByTestId('conversion-state')).toHaveText('pending');
+  await page.getByRole('button', { name: 'Cancel conversion', exact: true }).click();
+  await expect(page.getByTestId('cold-row-listeners')).toHaveText('0');
+  await expect(page.getByTestId('conversion-owners')).toHaveText('0');
+  await expect(page.getByTestId('old-conversion-state')).toContainText('superseded');
+  await page.getByRole('button', { name: 'Hydrate related row', exact: true }).click();
+  await expect(page.getByTestId('stored-type')).toHaveText('Formula');
+  await expect(page.getByTestId('converted-alpha')).toHaveText('');
+});

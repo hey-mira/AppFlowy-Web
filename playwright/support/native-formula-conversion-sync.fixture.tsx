@@ -2,9 +2,11 @@ import { useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Y from 'yjs';
 
+import { FormulaCell } from '@/application/database-yjs/cell.type';
 import { DatabaseContext, DatabaseContextState } from '@/application/database-yjs/context';
 import { CalculationType, FieldType, RollupDisplayMode } from '@/application/database-yjs/database.type';
 import { useSwitchPropertyType } from '@/application/database-yjs/dispatch';
+import { useCellSelector } from '@/application/database-yjs/selector';
 import { SyncContext } from '@/application/services/js-services/sync-protocol';
 import {
   YDatabase,
@@ -33,6 +35,9 @@ const evidence = {
   holdMetadata: false,
   metadataListeners: 0,
   metadataAttachments: 0,
+  coldRow: false,
+  coldRowReturned: false,
+  coldRowListeners: 0,
   requests: [] as string[],
   errors: [] as string[],
 };
@@ -139,6 +144,30 @@ const relatedRows = {
   'child-one': row('child-one', 'amount', FieldType.Number, '6'),
   'child-two': row('child-two', 'amount', FieldType.Number, '8'),
 };
+const coldRow = new Y.Doc() as YDoc;
+const coldCallbacks = new Set<unknown>();
+const coldOn = coldRow.on.bind(coldRow);
+const coldOff = coldRow.off.bind(coldRow);
+
+coldRow.on = (event, listener) => {
+  if (event === 'update') {
+    coldCallbacks.add(listener);
+    evidence.coldRowListeners = coldCallbacks.size;
+    notify();
+  }
+
+  return coldOn(event, listener);
+};
+
+coldRow.off = (event, listener) => {
+  if (event === 'update') {
+    coldCallbacks.delete(listener);
+    evidence.coldRowListeners = coldCallbacks.size;
+    notify();
+  }
+
+  return coldOff(event, listener);
+};
 
 remote.view.get(K.row_orders).push(Object.keys(relatedRows).map((id) => ({ id, height: 44 })));
 const cached = new Y.Doc({ guid: remote.doc.guid }) as YDoc;
@@ -203,7 +232,17 @@ const context: DatabaseContextState = {
 
     return cached;
   },
-  createRow: async (key) => relatedRows[key.split('_rows_').pop() as keyof typeof relatedRows],
+  createRow: async (key) => {
+    const id = key.split('_rows_').pop() as keyof typeof relatedRows;
+
+    if (id === 'child-one' && evidence.coldRow) {
+      evidence.coldRowReturned = true;
+      notify();
+      return coldRow;
+    }
+
+    return relatedRows[id];
+  },
   bindViewSync: (doc, options) => {
     if (doc !== cached || !options?.retain) throw new Error('Conversion did not retain related metadata');
     evidence.bindings += 1;
@@ -228,10 +267,25 @@ function raw(id: keyof typeof rows) {
   );
 }
 
+function LiveFormula() {
+  const cell = useCellSelector({ rowId: 'alpha', fieldId: 'formula' }) as FormulaCell | undefined;
+
+  return (
+    <output
+      data-testid='live-formula'
+      data-state={cell?.evaluationState ?? 'pending'}
+      data-error-source={cell?.errorSource ?? ''}
+    >
+      {cell?.error ?? cell?.data ?? ''}
+    </output>
+  );
+}
+
 function Fixture() {
   const switchType = useSwitchPropertyType();
   const [state, setState] = useState('idle');
   const [oldState, setOldState] = useState('idle');
+  const [live, setLive] = useState(false);
 
   useSyncExternalStore(
     (listener) => {
@@ -263,6 +317,23 @@ function Fixture() {
       <button onClick={() => convert(false)}>Convert Formula to Number</button>
       <button onClick={() => convert(true)}>Hold native conversion</button>
       <button onClick={() => releaseEvaluation?.()}>Release native conversion</button>
+      <button
+        onClick={() => {
+          evidence.coldRow = true;
+          (rows.alpha.getMap(E.data_section).get(E.database_row) as YDatabaseRow)
+            .get(K.cells)
+            .get('links')
+            .set(K.data, Y.Array.from(['child-one', 'child-two']));
+          notify();
+        }}
+      >
+        Use cold related row
+      </button>
+      <button onClick={() => Y.applyUpdate(coldRow, Y.encodeStateAsUpdate(relatedRows['child-one']))}>
+        Hydrate related row
+      </button>
+      <button onClick={() => setLive(true)}>Open native Formula</button>
+      <button onClick={() => setLive(false)}>Close native Formula</button>
       <button
         onClick={() => {
           remote.fields
@@ -306,9 +377,12 @@ function Fixture() {
       <output data-testid='conversion-workers'>{evidence.workers}</output>
       <output data-testid='metadata-listeners'>{evidence.metadataListeners}</output>
       <output data-testid='metadata-attachments'>{evidence.metadataAttachments}</output>
+      <output data-testid='cold-row-returned'>{String(evidence.coldRowReturned)}</output>
+      <output data-testid='cold-row-listeners'>{evidence.coldRowListeners}</output>
       <output data-testid='stored-type'>{FieldType[Number(base.fields.get('formula').get(K.type))]}</output>
       <output data-testid='converted-alpha'>{raw('alpha')}</output>
       <output data-testid='converted-beta'>{raw('beta')}</output>
+      {live && <LiveFormula />}
     </main>
   );
 }

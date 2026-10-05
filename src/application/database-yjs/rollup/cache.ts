@@ -1,6 +1,6 @@
 import Big from 'big.js';
 
-import { isNumericCalculation } from '@/application/database-yjs/calculation';
+import { isNumericCalculation, nativeNumberMedian } from '@/application/database-yjs/calculation';
 import { parseYDatabaseCellToCell } from '@/application/database-yjs/cell.parse';
 import { DateTimeCell, RollupListItem } from '@/application/database-yjs/cell.type';
 import { waitForDatabaseHydration } from '@/application/database-yjs/database.hydration';
@@ -484,6 +484,13 @@ async function computeRollupInSession(context: RollupComputeContext, parent: Com
 
             if (session.signal?.aborted) throw new DOMException('Rollup observation cancelled', 'AbortError');
             if (doc) session.observe?.(doc);
+            if (
+              context.requireLoadedSources &&
+              (!doc || !(await waitForDatabaseRowHydration(doc, undefined, session.signal)))
+            ) {
+              throw new ComputedSourceUnavailableError(`Related row ${key} could not be hydrated for formula evaluation`);
+            }
+
             return doc;
           }
         : undefined,
@@ -658,7 +665,12 @@ async function computeRollupCellValue(
 
   for (const relatedRowId of relatedRowIds) {
     if (session.signal?.aborted) throw new DOMException('Rollup observation cancelled', 'AbortError');
-    if (!context.createRow) continue;
+    if (!context.createRow) {
+      if (context.requireLoadedSources)
+        throw new ComputedSourceUnavailableError(`Related row ${relatedRowId} could not be loaded for formula evaluation`);
+      continue;
+    }
+
     const rowKey = getRowKey(relatedDoc.guid, relatedRowId);
     const relatedRowDoc = await context.createRow(rowKey);
 
@@ -666,7 +678,12 @@ async function computeRollupCellValue(
     const relatedRowRoot = relatedRowDoc.getMap(YjsEditorKey.data_section);
     const relatedRow = relatedRowRoot?.get(YjsEditorKey.database_row) as YDatabaseRow | undefined;
 
-    if (!relatedRow) continue;
+    if (!relatedRow) {
+      if (context.requireLoadedSources)
+        throw new ComputedSourceUnavailableError(`Related row ${relatedRowId} could not be hydrated for formula evaluation`);
+      continue;
+    }
+
     const cell = relatedRow.get(YjsDatabaseKey.cells)?.get(rollupOption.target_field_id);
     const parsedCell = cell ? parseYDatabaseCellToCell(cell, targetField) : undefined;
     let parsedData = parsedCell?.data;
@@ -872,9 +889,7 @@ async function computeRollupCellValue(
 
       case CalculationType.Median: {
         if (numericValues.length === 0) return { value: '' };
-        const sorted = [...numericValues].sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+        const median = nativeNumberMedian(numericValues);
 
         return { value: formatNumericResult(targetField, median), rawNumeric: median };
       }
