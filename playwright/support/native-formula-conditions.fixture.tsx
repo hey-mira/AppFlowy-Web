@@ -1,15 +1,22 @@
+import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Y from 'yjs';
 
+import { FormulaCell as FormulaCellValue } from '@/application/database-yjs/cell.type';
 import { DatabaseContext, DatabaseContextState } from '@/application/database-yjs/context';
-import { FieldType, FilterType, SortCondition } from '@/application/database-yjs/database.type';
+import { CalculationType, FieldType, FilterType, RollupDisplayMode, SortCondition } from '@/application/database-yjs/database.type';
+import { filterBy } from '@/application/database-yjs/filter';
+import { evaluateRollupCell } from '@/application/database-yjs/rollup/cache';
+import { getRowKey } from '@/application/database-yjs/row_meta';
 import {
   useAdvancedFilterSelector,
   useAdvancedFiltersSelector,
+  useCellSelector,
   useFilterSelector,
   useFormulaResultType,
   useRowOrdersSelector,
 } from '@/application/database-yjs/selector';
+import { sortBy } from '@/application/database-yjs/sort';
 import {
   YDatabase,
   YDatabaseCell,
@@ -25,11 +32,27 @@ import {
   YjsDatabaseKey as K,
   YjsEditorKey as E,
 } from '@/application/types';
+import { FormulaCell } from '@/components/database/components/cell/formula/FormulaCell';
 import '@/i18n/config';
 
 const query = new URLSearchParams(window.location.search);
 const mode = query.get('mode') ?? 'types';
 const fieldId = query.get('field') ?? 'formula';
+const numericEvidence = { workers: 0, errors: [] as string[], cells: {} as Record<string, unknown> };
+
+if (mode === 'numbers') {
+  (window as unknown as { nativeNumericEvidence: typeof numericEvidence }).nativeNumericEvidence = numericEvidence;
+  const RealWorker = window.Worker;
+
+  window.Worker = class extends RealWorker {
+    constructor(url: string | URL, options?: WorkerOptions) {
+      super(url, options);
+      numericEvidence.workers += 1;
+    }
+  };
+  window.addEventListener('error', (event) => numericEvidence.errors.push(event.message));
+}
+
 const doc = new Y.Doc({ guid: 'native-conditions-database' }) as YDoc;
 const database = new Y.Map() as YDatabase;
 const fields = new Y.Map() as YDatabaseFields;
@@ -42,6 +65,7 @@ database.set(K.id, doc.guid);
 database.set(K.fields, fields);
 database.set(K.views, views);
 view.set(K.id, 'view');
+view.set(K.is_inline, true);
 view.set(K.filters, new Y.Array());
 view.set(K.sorts, new Y.Array());
 views.set('view', view);
@@ -50,6 +74,7 @@ function field(id: string, type: FieldType, expression?: string) {
   const value = new Y.Map() as YDatabaseField;
 
   value.set(K.id, id);
+  value.set(K.database_id, doc.guid);
   value.set(K.name, id);
   value.set(K.type, type);
   if (expression !== undefined) {
@@ -100,7 +125,35 @@ field('label', FieldType.Formula, 'if(prop("done"), "done", "open")');
 field('flag', FieldType.Formula, 'prop("price") > 5');
 field('next', FieldType.Formula, 'dateAdd(prop("due"), 1, "days")');
 
-if (mode === 'epoch') {
+if (mode === 'numbers') {
+  field('bad', FieldType.Checkbox);
+  field('numeric', FieldType.Formula, 'if(prop("bad"), length(match("x", "[")), prop("price"))');
+  field('self', FieldType.Relation);
+  field('rolled', FieldType.Rollup);
+  for (const [id, type, settings] of [
+    ['self', FieldType.Relation, { database_id: doc.guid }],
+    ['rolled', FieldType.Rollup, { relation_field_id: 'self', target_field_id: 'numeric', calculation_type: CalculationType.Sum, show_as: RollupDisplayMode.Calculated }],
+  ] as const) {
+    const options = new Y.Map();
+    const option = new Y.Map();
+
+    Object.entries(settings).forEach(([key, value]) => option.set(key, value));
+    options.set(String(type), option);
+    fields.get(id).set(K.type_option, options);
+  }
+
+  for (const [id, value] of [
+    ['empty', null], ['nan', 'NaN'], ['positive-infinity', 'Infinity'], ['positive', '8'], ['zero', '0'],
+    ['error', '42'], ['negative-infinity', '-Infinity'], ['negative-zero', '-0'], ['negative', '-3.5'],
+    ['fraction', '0.000001'], ['large', '9007199254740991'], ['nan-second', 'NaN'],
+  ] as const) {
+    row(id, {
+      ...(value === null ? {} : { price: { type: FieldType.Number, data: value } }),
+      bad: { type: FieldType.Checkbox, data: id === 'error' ? 'Yes' : 'No' },
+      self: { type: FieldType.Relation, data: Y.Array.from([id]) },
+    });
+  }
+} else if (mode === 'epoch') {
   row('epoch', { due: { type: FieldType.DateTime, data: '0' } });
   row('empty', {});
 } else if (mode === 'range') {
@@ -154,9 +207,17 @@ if (query.has('sort')) {
   filter.set(K.id, 'formula-filter');
   filter.set(K.field_id, fieldId);
   filter.set(K.filter_type, FilterType.Data);
-  filter.set(K.type, FieldType.Formula);
+  filter.set(K.type, fieldId === 'rolled' ? FieldType.Rollup : FieldType.Formula);
   filter.set(K.condition, Number(query.get('condition')));
   filter.set(K.content, query.get('content') ?? '');
+  if (fieldId === 'rolled') {
+    filter.set(K.rollup_target_type, FieldType.Number);
+    filter.set(K.rollup_meta, {
+      target_field_type: FieldType.Number, rollup_show_as: RollupDisplayMode.Calculated,
+      rollup_calculation_type: CalculationType.Sum, relation_field_id: 'self', target_field_id: 'numeric',
+    });
+  }
+
   if (query.get('selection') === 'advanced') {
     const root = new Y.Map() as YDatabaseFilter;
 
@@ -176,6 +237,19 @@ const context: DatabaseContextState = {
   rowMap: rows,
   seedsReady: true,
   blobPrefetchComplete: true,
+  ...(mode === 'numbers' ? {
+    getViewIdFromDatabaseId: async (id: string) => id,
+    loadView: async (id: string) => {
+      if (id !== doc.guid) throw new Error(`Missing fixture database ${id}`);
+      return doc;
+    },
+    createRow: async (key: string) => {
+      const entry = Object.entries(rows).find(([id]) => getRowKey(doc.guid, id) === key);
+
+      if (!entry) throw new Error(`Missing fixture row ${key}`);
+      return entry[1];
+    },
+  } : {}),
 };
 
 function Conditions() {
@@ -189,8 +263,27 @@ function Conditions() {
         {orders?.map(({ id }) => id).join(',')}
       </output>
       {query.has('selection') && <Selections />}
+      {mode === 'numbers' && <NumericRows />}
     </>
   );
+}
+
+function NumericRows() {
+  const type = useFormulaResultType('numeric');
+
+  return <><output data-testid='numeric-native-type'>{String(type)}</output>{Object.keys(rows).map((id) => <NumericRow key={id} id={id} />)}</>;
+}
+
+function NumericRow({ id }: { id: string }) {
+  const cell = useCellSelector({ rowId: id, fieldId: 'numeric' }) as FormulaCellValue | undefined;
+
+  useEffect(() => {
+    numericEvidence.cells[id] = {
+      resultType: cell?.resultType, evaluationState: cell?.evaluationState, rawNumeric: cell?.rawNumeric,
+      nativeValue: cell?.nativeValue, error: cell?.error,
+    };
+  }, [cell, id]);
+  return <div><span>{id}: </span><FormulaCell cell={cell} rowId={id} fieldId='numeric' readOnly wrap /></div>;
 }
 
 function Selections() {
@@ -207,8 +300,30 @@ function Selections() {
   );
 }
 
-createRoot(document.getElementById('root')!).render(
-  <DatabaseContext.Provider value={context}>
-    <Conditions />
-  </DatabaseContext.Provider>
-);
+async function mount() {
+  if (mode === 'numbers' && fieldId === 'rolled') {
+    // Public host conditions consume the actual production Rollup results.
+    const values = new Map(await Promise.all(Object.entries(rows).map(async ([id, rowDoc]) => [id,
+      await evaluateRollupCell({ baseDoc: doc, database, rollupField: fields.get('rolled'), fieldId: 'rolled',
+        row: rowDoc.getMap(E.data_section).get(E.database_row) as YDatabaseRow, rowId: id,
+        getViewIdFromDatabaseId: context.getViewIdFromDatabaseId, loadView: context.loadView, createRow: context.createRow,
+      }),
+    ] as const)));
+    const options = { getRollupCellValue: (id: string) => values.get(id)! };
+    const filtered = filterBy(view.get(K.row_orders).toArray(), view.get(K.filters), fields, rows, options);
+    const ordered = sortBy(filtered, view.get(K.sorts), fields, rows, options);
+
+    createRoot(document.getElementById('root')!).render(<DatabaseContext.Provider value={context}>
+      <h1>Native numeric Rollup conditions</h1><output data-testid='condition-orders'>{ordered.map(({ id }) => id).join(',')}</output><NumericRows />
+    </DatabaseContext.Provider>);
+    return;
+  }
+
+  createRoot(document.getElementById('root')!).render(
+    <DatabaseContext.Provider value={context}>
+      <Conditions />
+    </DatabaseContext.Provider>
+  );
+}
+
+void mount();

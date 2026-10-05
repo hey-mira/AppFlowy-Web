@@ -12,11 +12,11 @@ import { Row } from '@/application/database-yjs/selector';
 import { RowId, YDatabaseFields, YDatabaseSorts, YDoc, YjsDatabaseKey } from '@/application/types';
 import { canonicalizeUserUid } from '@/application/user-uid';
 
-type SortableValue = ConditionSortValue;
+type SortableValue = ConditionSortValue | { nativeNumber: number | undefined };
 
 type SortOptions = {
   getRelationCellText?: (rowId: string, fieldId: string) => string;
-  getRollupCellValue?: (rowId: string, fieldId: string) => { value: string; rawNumeric?: number };
+  getRollupCellValue?: (rowId: string, fieldId: string) => { value: string; rawNumeric?: number; error?: string };
   getAttributionName?: (uid: string) => string | undefined;
   /** Shared native results; sorting never evaluates formulas itself. */
   getFormulaResult?: (rowId: string, fieldId: string) => FormulaCellResult | undefined;
@@ -43,6 +43,21 @@ export function sortBy(
 
   // Create a function for comparison
   const compare = (a: SortableValue, b: SortableValue, order: string): number => {
+    if (typeof a === 'object' || typeof b === 'object') {
+      const left = typeof a === 'object' ? a.nativeNumber : undefined;
+      const right = typeof b === 'object' ? b.nativeNumber : undefined;
+
+      // Null/errors stay last in either direction; NaN is a distinct value.
+      if (left === undefined) return right === undefined ? 0 : 1;
+      if (right === undefined) return -1;
+      const result = Number.isNaN(left)
+        ? Number.isNaN(right) ? 0 : 1
+        : Number.isNaN(right) ? -1 : left < right ? -1 : left > right ? 1 : 0;
+
+      // Zero and NaN ties retain their original row order.
+      return order === 'asc' ? result : -result;
+    }
+
     if (a === undefined && b === undefined) return 0;
     // undefined value is placed at the end
     if (a === undefined) return order === 'asc' ? 1 : -1;
@@ -87,11 +102,11 @@ export function sortBy(
         const defaultData = defaultValueForSort(predicateType, Number(sort.get(YjsDatabaseKey.condition)));
         const result = options?.getFormulaResult?.(row.id, fieldId);
 
+        if (predicateType === FieldType.Number)
+          return { nativeNumber: result && !result.error ? result.rawNumeric : undefined };
         if (!result || result.error) return defaultData;
 
         switch (predicateType) {
-          case FieldType.Number:
-            return result.rawNumeric !== undefined && Number.isFinite(result.rawNumeric) ? result.rawNumeric : defaultData;
           case FieldType.DateTime:
             return result.rawDate ? result.rawDate.start : defaultData;
           case FieldType.Checkbox:
@@ -118,7 +133,8 @@ export function sortBy(
 
       const defaultData = defaultValueForSort(fieldType, Number(sort.get(YjsDatabaseKey.condition)), isRollupNumeric);
 
-      if (!snapshot) return defaultData;
+      if (!snapshot)
+        return isRollupNumeric && options?.getRollupCellValue ? { nativeNumber: undefined } : defaultData;
 
       if (fieldType === FieldType.LastEditedTime) {
         return snapshot.row.get(YjsDatabaseKey.last_modified);
@@ -158,11 +174,7 @@ export function sortBy(
         const rollupValue = options.getRollupCellValue(rowId, fieldId);
 
         if (isRollupNumeric) {
-          if (typeof rollupValue?.rawNumeric === 'number' && Number.isFinite(rollupValue.rawNumeric)) {
-            return rollupValue.rawNumeric;
-          }
-
-          return defaultData;
+          return { nativeNumber: rollupValue && !rollupValue.error ? rollupValue.rawNumeric : undefined };
         }
 
         return rollupValue?.value || defaultData;

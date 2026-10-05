@@ -17,17 +17,22 @@ test.beforeEach(async ({ page, formulaHTML }) => {
 test.afterEach(async ({ page }, testInfo) => {
   const json = testInfo.outputPath('native-formula-conditions.json');
   const screenshot = testInfo.outputPath('native-formula-conditions.png');
+  const output = page.getByTestId('condition-orders');
+  const present = await output.count();
 
   await writeFile(
     json,
     JSON.stringify(
       {
         url: page.url(),
-        order: await page.getByTestId('condition-orders').textContent(),
-        resultType: await page.getByTestId('condition-orders').getAttribute('data-result-type'),
+        order: present ? await output.textContent() : null,
+        resultType: present ? await output.getAttribute('data-result-type') : null,
+        numeric: await page.evaluate(() => (window as unknown as { nativeNumericEvidence?: unknown }).nativeNumericEvidence),
+        profile: process.env.FORMULA_FIXTURE_PRODUCTION === '1' ? 'production' : 'development',
         browserVersion: page.context().browser()?.version(),
       },
-      null,
+      (_key, value: unknown) => typeof value === 'number' && (!Number.isFinite(value) || Object.is(value, -0))
+        ? { Number: Object.is(value, -0) ? '-0' : String(value) } : value,
       2
     )
   );
@@ -35,6 +40,77 @@ test.afterEach(async ({ page }, testInfo) => {
   await testInfo.attach('native-formula-conditions.json', { path: json, contentType: 'application/json' });
   await testInfo.attach('native-formula-conditions.png', { path: screenshot, contentType: 'image/png' });
 });
+
+// Keep the host's stable zero ties and empty-last convention. NaN is a value:
+// after +Infinity ascending, before it descending, with NaN ties stable.
+const numericAscending = 'negative-infinity,negative,zero,negative-zero,fraction,positive,large,positive-infinity,nan,nan-second,empty,error';
+const numericDescending = 'nan,nan-second,positive-infinity,large,positive,fraction,zero,negative-zero,negative,negative-infinity,empty,error';
+
+for (const field of ['numeric', 'rolled']) {
+  for (const [direction, expected] of [['asc', numericAscending], ['desc', numericDescending]]) {
+    test(`native special Number ${field} sorts ${direction} without merging NaN and null`, async ({ page, formulaURL }) => {
+      await page.goto(new URL(`/formula-conditions-fixture?mode=numbers&field=${field}&sort=${direction}`, formulaURL).href);
+      await expect(page.getByTestId('condition-orders')).toHaveText(expected);
+      await expect(page.getByTestId('numeric-native-type')).toHaveText('number');
+      await expect(page.getByTestId('formula-cell-positive-infinity-numeric')).toHaveText('Infinity');
+      await expect(page.getByTestId('formula-cell-negative-infinity-numeric')).toHaveText('-Infinity');
+      await expect(page.getByTestId('formula-cell-nan-numeric')).toHaveText('NaN');
+      await expect(page.getByTestId('formula-cell-negative-zero-numeric')).toHaveText('-0');
+      await expect(page.getByTestId('formula-cell-empty-numeric')).toHaveAttribute('data-evaluation-state', 'null');
+      await expect(page.getByTestId('formula-cell-error-numeric')).toHaveAttribute('data-evaluation-state', 'error');
+      await expect(page.getByTestId('formula-cell-positive-numeric')).toHaveText('8');
+    });
+  }
+}
+
+const numericFilters = [
+  { condition: 0, content: '0', expected: 'zero,negative-zero' },
+  { condition: 1, content: '0', expected: 'positive-infinity,positive,negative-infinity,negative,fraction,large' },
+  { condition: 2, content: '0', expected: 'positive-infinity,positive,fraction,large' },
+  { condition: 3, content: '0', expected: 'negative-infinity,negative' },
+  { condition: 4, content: '0', expected: 'positive-infinity,positive,zero,negative-zero,fraction,large' },
+  { condition: 5, content: '0', expected: 'zero,negative-infinity,negative-zero,negative' },
+  { condition: 6, content: '', expected: 'empty' },
+  { condition: 7, content: '', expected: 'nan,positive-infinity,positive,zero,negative-infinity,negative-zero,negative,fraction,large,nan-second' },
+  { condition: 0, content: 'Infinity', expected: 'positive-infinity' },
+  { condition: 1, content: 'Infinity', expected: 'positive,zero,negative-infinity,negative-zero,negative,fraction,large' },
+  { condition: 2, content: 'Infinity', expected: '' },
+  { condition: 3, content: 'Infinity', expected: 'positive,zero,negative-infinity,negative-zero,negative,fraction,large' },
+  { condition: 4, content: 'Infinity', expected: 'positive-infinity' },
+  { condition: 5, content: 'Infinity', expected: 'positive-infinity,positive,zero,negative-infinity,negative-zero,negative,fraction,large' },
+  { condition: 0, content: '-Infinity', expected: 'negative-infinity' },
+  { condition: 1, content: '-Infinity', expected: 'positive-infinity,positive,zero,negative-zero,negative,fraction,large' },
+  { condition: 2, content: '-Infinity', expected: 'positive-infinity,positive,zero,negative-zero,negative,fraction,large' },
+  { condition: 3, content: '-Infinity', expected: '' },
+  { condition: 4, content: '-Infinity', expected: 'positive-infinity,positive,zero,negative-infinity,negative-zero,negative,fraction,large' },
+  { condition: 5, content: '-Infinity', expected: 'negative-infinity' },
+  { condition: 2, content: '9007199254740990', expected: 'positive-infinity,large' },
+  { condition: 3, content: '0.0000011', expected: 'zero,negative-infinity,negative-zero,negative,fraction' },
+  // A blank bound disables the predicate, retaining every row and its state.
+  { condition: 2, content: ' ', expected: 'empty,nan,positive-infinity,positive,zero,error,negative-infinity,negative-zero,negative,fraction,large,nan-second' },
+  ...[0, 1, 2, 3, 4, 5].map((condition) => ({ condition, content: 'NaN', expected: '' })),
+];
+
+for (const { condition, content, expected } of numericFilters) {
+  test(`native special Number filter ${condition} with ${JSON.stringify(content)} preserves values and failure state`, async ({ page, formulaURL }) => {
+    await page.goto(new URL(`/formula-conditions-fixture?${new URLSearchParams({ mode: 'numbers', field: 'numeric', condition: String(condition), content })}`, formulaURL).href);
+    await expect(page.getByTestId('numeric-native-type')).toHaveText('number');
+    await expect(page.getByTestId('formula-cell-positive-numeric')).toHaveAttribute('data-evaluation-state', 'value');
+    await expect(page.getByTestId('condition-orders')).toHaveText(expected);
+    const evidence = await page.evaluate(() => (window as unknown as { nativeNumericEvidence: { errors: string[]; workers: number } }).nativeNumericEvidence);
+
+    expect(evidence.errors).toEqual([]);
+    expect(evidence.workers).toBeGreaterThan(0);
+  });
+}
+
+for (const { condition, content, expected } of numericFilters.slice(0, 8)) {
+  test(`native numeric Rollup filter ${condition} preserves non-finite values and excludes errors`, async ({ page, formulaURL }) => {
+    await page.goto(new URL(`/formula-conditions-fixture?${new URLSearchParams({ mode: 'numbers', field: 'rolled', condition: String(condition), content })}`, formulaURL).href);
+    await expect(page.getByTestId('numeric-native-type')).toHaveText('number');
+    await expect(page.getByTestId('condition-orders')).toHaveText(expected);
+  });
+}
 
 const types = [
   { field: 'double', type: 'number', condition: 2, content: '10', expected: 'row-b,row-c' },

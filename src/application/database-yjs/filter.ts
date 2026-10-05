@@ -1041,7 +1041,13 @@ export function numberFilterCheck(data: string, content: string, condition: numb
     return false;
   }
 
-  const res = EnhancedBigStats.compare(data, content);
+  // Explicit infinities bound every finite decimal, including values beyond
+  // JS's numeric range. Finite strings retain the exact decimal comparator.
+  const dataInfinity = /^[+-]?Infinity$/.test(data.trim());
+  const contentInfinity = /^[+-]?Infinity$/.test(content.trim());
+  const res = dataInfinity || contentInfinity
+    ? (dataInfinity ? Math.sign(Number(data)) : 0) - (contentInfinity ? Math.sign(Number(content)) : 0)
+    : EnhancedBigStats.compare(data, content);
 
   switch (condition) {
     case NumberFilterCondition.Equal:
@@ -1618,8 +1624,9 @@ export function rollupFilterCheck(
   }
 
   if (type === FieldType.Number) {
+    if (value?.error) return false;
     const data = value
-      ? value.rawNumeric !== undefined && Number.isFinite(value.rawNumeric)
+      ? value.rawNumeric !== undefined
         ? String(value.rawNumeric)
         : value.value.trim()
       : legacyText?.trim() ?? '';
