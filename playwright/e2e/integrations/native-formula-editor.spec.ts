@@ -472,3 +472,52 @@ test('property menu displays renamed references from native spans', async ({ pag
   await expect(preview).toHaveText('prop("合计🧮") + 5');
   await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
 });
+
+test('a saved missing property keeps its ID until the user explicitly selects a replacement', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("Price") + 2');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") + 2');
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("price") + 2');
+  await page.getByRole('button', { name: 'Rename and reuse Price', exact: true }).click();
+  await page.getByRole('button', { name: 'Remove Price', exact: true }).click();
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await expect(input).toHaveAttribute('data-value', 'prop("price") + 2');
+  await expect(page.getByTestId('formula-token')).toHaveAttribute('data-missing', 'true');
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await page.getByTestId('formula-editor-cancel').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("price") + 2');
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await replaceSource(input, '');
+  await page.getByTestId('formula-catalogue-property-other').click();
+  await expect(input).toHaveAttribute('data-value', 'prop("other")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('100');
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("other")');
+  await expect(page.getByTestId('committed-total')).toHaveText('100');
+});
+
+test('catalogue and examples insert at the Slate selection and preserve undo', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, '3 + ');
+  await page.getByTestId('formula-catalogue-property-other').click();
+  await expect(input).toHaveAttribute('data-value', '3 + prop("other")');
+  await expect(input).toBeFocused();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('103');
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', '3 + ');
+  await input.press('ControlOrMeta+Shift+z');
+  await expect(input).toHaveAttribute('data-value', '3 + prop("other")');
+  await input.press('ControlOrMeta+a');
+  await input.press('Escape');
+  await page.getByTestId('formula-catalogue-property-other').hover();
+  await page.getByTestId('formula-docs').locator('[data-expression=\'prop("other")\']').click();
+  await expect(input).toHaveAttribute('data-value', 'prop("other")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('100');
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', '3 + prop("other")');
+});

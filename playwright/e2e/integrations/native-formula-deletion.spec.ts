@@ -202,3 +202,39 @@ test('native dependency initialization failure is visible and Cancel remains saf
   expect(current.attemptedWorkers).toBeGreaterThanOrEqual(2);
   expect(current.pageErrors).toEqual([]);
 });
+
+test('Cancel while checking detaches the old warning before a new confirmation opens', async ({ page }) => {
+  await expect(page.getByTestId('formula-deletion-warning').locator('li')).toHaveCount(6);
+  await page.evaluate(() => {
+    const fixture = (window as unknown as { deletionFixture: Fixture }).deletionFixture;
+
+    fixture.setHold('engine.remove');
+    fixture.fields.get('price')!.set('name', 'Changed while checking');
+  });
+  await expect.poll(async () => (await evidence(page)).held).toBe(true);
+  await expect(page.getByTestId('formula-deletion-pending')).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('field-present')).toHaveText('true');
+  await page.evaluate(() => (window as unknown as { deletionFixture: Fixture }).deletionFixture.selectTarget('links'));
+  await expect(page.getByTestId('formula-deletion-warning').locator('li')).toHaveText([
+    'Rolled formula',
+    'Rolled summary',
+  ]);
+  await page.evaluate(() => (window as unknown as { deletionFixture: Fixture }).deletionFixture.release());
+  await expect.poll(async () => (await evidence(page)).held).toBe(false);
+  await expect(page.getByTestId('formula-deletion-warning').locator('li')).toHaveText([
+    'Rolled formula',
+    'Rolled summary',
+  ]);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('committed-total')).toHaveText('21');
+  await expect
+    .poll(async () => {
+      const current = await evidence(page);
+
+      return current.terminated === current.workers - 1;
+    })
+    .toBe(true);
+});

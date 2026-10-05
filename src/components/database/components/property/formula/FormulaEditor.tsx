@@ -619,6 +619,8 @@ const FormulaCatalogue = memo(function FormulaCatalogue({
                       className='flex h-8 w-full items-center gap-2 rounded-300 px-2 text-left text-sm text-text-primary hover:bg-fill-content-hover disabled:opacity-50'
                       onMouseEnter={() => onSelect(docsItem(item, schema))}
                       onFocus={() => onSelect(docsItem(item, schema))}
+                      // Keep Slate's range while the catalogue triggers insertion.
+                      onMouseDown={(event) => event.preventDefault()}
                       onClick={() => {
                         onSelect(docsItem(item, schema));
                         const text = item.insert_text;

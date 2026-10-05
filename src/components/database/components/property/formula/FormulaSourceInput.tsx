@@ -184,7 +184,9 @@ export const FormulaSourceInput = memo(
           const start = offsets?.start ?? editorSource(editor).length;
 
           ReactEditor.focus(editor);
-          replaceSourceRange(editor, start, offsets?.end ?? start, text, caretOffset);
+          withFormulaHistoryBatch(editor, () =>
+            replaceSourceRange(editor, start, offsets?.end ?? start, text, caretOffset)
+          );
         },
         selection: () => {
           syncSelectionFromDOM();
