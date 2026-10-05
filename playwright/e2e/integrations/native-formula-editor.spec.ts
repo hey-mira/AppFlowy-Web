@@ -12,6 +12,7 @@ type Evidence = {
   workers: number;
   terminated: number;
   held: boolean;
+  clockOwners: number;
   requests: Array<{ worker: number; method: string; args: unknown[] }>;
   observed: Array<{ source: string; preview: string; diagnostics: string }>;
   external: {
@@ -26,13 +27,18 @@ type Evidence = {
 };
 
 type ExternalPreviewFixture = {
-  enableExternalSources: (options?: { cold?: boolean; clock?: boolean }) => void;
+  enableExternalSources: (options?: { cold?: boolean; clock?: boolean; people?: boolean }) => void;
   holdSource: (kind: 'metadata' | 'row') => void;
   releaseSource: () => void;
   setRemoteExpression: (expression: string) => void;
 };
 
-async function enableExternalPreview(page: Page, options: { cold?: boolean; clock?: boolean } = {}) {
+type MemberPreviewFixture = {
+  setMemberName: (name: string) => Promise<void>;
+  trackClockSubscriptions: () => void;
+};
+
+async function enableExternalPreview(page: Page, options: { cold?: boolean; clock?: boolean; people?: boolean } = {}) {
   await page.getByRole('button', { name: 'Close consumers', exact: true }).click();
   await page.evaluate((options) => {
     (window as unknown as { editorFixture: ExternalPreviewFixture }).editorFixture.enableExternalSources(options);
@@ -708,5 +714,102 @@ test('candidate preview keeps ticking for an external Formula through Rollup', a
   await page.clock.fastForward(1100);
   await expect(page.getByTestId('formula-preview-value')).toHaveText('3000');
   await page.getByTestId('formula-editor-cancel').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+});
+
+async function prepareMemberPreview(page: Page, formulaURL: string) {
+  await page.goto(new URL('/native-formula-editor-fixture?people', formulaURL).href);
+  await expect(page.getByTestId('committed-total')).toHaveText('25');
+  await expect(page.getByTestId('formula-editor-input')).toBeEditable();
+  await page.clock.install({ time: new Date('2026-10-05T00:00:00Z') });
+  await page.clock.setFixedTime(new Date('2026-10-05T00:00:00Z'));
+  await page.getByRole('button', { name: 'Close consumers', exact: true }).click();
+  await page.evaluate(async () => {
+    const fixture = (window as unknown as { editorFixture: MemberPreviewFixture }).editorFixture;
+
+    await fixture.setMemberName('Ada');
+    fixture.trackClockSubscriptions();
+  });
+}
+
+// Member-name changes live in IndexedDB, not the formula's collaborative
+// document. A candidate with no saved clock dependency must still refresh.
+for (const [id, label] of [
+  ['person', 'Person'],
+  ['creator', 'CreatedBy'],
+  ['editor', 'LastEditedBy'],
+  ['rollup', 'Person Rollup'],
+]) {
+  test(`member-only candidate ${label} refreshes names every 30 seconds and cancels its clock`, async ({
+    page,
+    formulaURL,
+  }) => {
+    await prepareMemberPreview(page, formulaURL);
+    const input = page.getByTestId('formula-editor-input');
+
+    if (id === 'rollup') await enableExternalPreview(page, { people: true });
+    await replaceSource(input, `prop("${id}").join(",")`);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('Ada');
+    await expect.poll(async () => (await evidence(page)).clockOwners).toBe(1);
+    const documentRevision = await page.getByTestId('formula-editor').getAttribute('data-document-revision');
+    const evaluations = (await evidence(page)).requests.filter((request) => request.method === 'engine.evaluate').length;
+
+    await page.evaluate(async () => {
+      await (window as unknown as { editorFixture: MemberPreviewFixture }).editorFixture.setMemberName('Grace');
+    });
+    await page.clock.setFixedTime(new Date('2026-10-05T00:00:29Z'));
+    await page.clock.fastForward(29_000);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('Ada');
+    expect((await evidence(page)).requests.filter((request) => request.method === 'engine.evaluate')).toHaveLength(
+      evaluations
+    );
+    await page.clock.setFixedTime(new Date('2026-10-05T00:00:30Z'));
+    await page.clock.fastForward(1_100);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('Grace');
+    await expect(page.getByTestId('formula-editor')).toHaveAttribute('data-document-revision', documentRevision!);
+    await expect(input).toHaveAttribute('data-value', `prop("${id}").join(",")`);
+    await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+    await page.getByTestId('formula-editor-cancel').click();
+    await expect.poll(async () => (await evidence(page)).clockOwners).toBe(0);
+    await expect
+      .poll(async () => {
+        const state = await evidence(page);
+
+        return state.workers === state.terminated;
+      })
+      .toBe(true);
+    const stopped = (await evidence(page)).requests.length;
+
+    await page.clock.setFixedTime(new Date('2026-10-05T00:01:30Z'));
+    await page.clock.fastForward(60_000);
+    expect((await evidence(page)).requests).toHaveLength(stopped);
+  });
+}
+
+test('member candidate history uses saved names without owning the live roster clock', async ({ page, formulaURL }) => {
+  await prepareMemberPreview(page, formulaURL);
+  await replaceSource(page.getByTestId('formula-editor-input'), 'prop("person").join(",")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('Ada');
+  await expect.poll(async () => (await evidence(page)).clockOwners).toBe(1);
+  await page.getByRole('button', { name: 'Switch to history', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('Saved Ada');
+  await expect.poll(async () => (await evidence(page)).clockOwners).toBe(0);
+  const requests = (await evidence(page)).requests.length;
+
+  await page.evaluate(async () => {
+    await (window as unknown as { editorFixture: MemberPreviewFixture }).editorFixture.setMemberName('Grace');
+  });
+  await page.clock.setFixedTime(new Date('2026-10-05T00:01:00Z'));
+  await page.clock.fastForward(60_000);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('Saved Ada');
+  expect((await evidence(page)).requests).toHaveLength(requests);
+  await page.getByTestId('formula-editor-cancel').click();
+  await expect
+    .poll(async () => {
+      const state = await evidence(page);
+
+      return state.workers === state.terminated;
+    })
+    .toBe(true);
   await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
 });

@@ -8,6 +8,7 @@ import { CalculationType, FieldType, RollupDisplayMode } from '@/application/dat
 import { parseFormulaTypeOption } from '@/application/database-yjs/fields/formula/parse';
 import { markDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
 import { useCellSelector } from '@/application/database-yjs/selector';
+import { db } from '@/application/db';
 import { SyncContext } from '@/application/services/js-services/sync-protocol';
 import {
   YDatabase,
@@ -42,6 +43,7 @@ const evidence = {
   replies: [] as Array<{ worker: number; method: string; value: unknown }>,
   observed: [] as Array<{ source: string; preview: string; diagnostics: string }>,
   pageErrors: [] as string[],
+  clockOwners: 0,
   external: {
     bindings: 0,
     releases: 0,
@@ -143,6 +145,20 @@ field('quantity', 'Quantity', FieldType.Number);
 field('subtotal', 'Subtotal', FieldType.Formula, 'prop("price") * prop("quantity")');
 field('total', 'Total', FieldType.Formula, 'prop("subtotal") + 5');
 
+const peoplePreview = new URLSearchParams(location.search).has('people');
+
+if (peoplePreview) {
+  const person = field('person', 'Person', FieldType.Person);
+  const options = new Y.Map();
+  const option = new Y.Map();
+
+  option.set(K.persons, JSON.stringify([{ id: 'person-ada', name: 'Saved Ada' }]));
+  options.set(String(FieldType.Person), option);
+  person.set(K.type_option, options);
+  field('creator', 'Created by', FieldType.CreatedBy);
+  field('editor', 'Last edited by', FieldType.LastEditedBy);
+}
+
 const rowDocs: Record<string, YDoc> = {};
 
 for (const [id, title, price, quantity] of [
@@ -156,6 +172,16 @@ for (const [id, title, price, quantity] of [
   doc.getMap(E.data_section).set(E.database_row, row);
   row.set(K.id, id);
   row.set(K.cells, cells);
+  if (peoplePreview) {
+    const cell = new Y.Map() as YDatabaseCell;
+
+    cell.set(K.field_type, FieldType.Person);
+    cell.set(K.data, JSON.stringify(['person-ada']));
+    cells.set('person', cell);
+    row.set(K.created_by, '9007199254740993');
+    row.set(K.last_edited_by, '9007199254740993');
+  }
+
   for (const [id, type, data] of [
     ['title', FieldType.RichText, title],
     ['price', FieldType.Number, String(price)],
@@ -300,12 +326,25 @@ const externalLoaders: Partial<DatabaseContextState> = {
   },
 };
 
-function enableExternalSources({ cold = false, clock = false }: { cold?: boolean; clock?: boolean } = {}) {
+function enableExternalSources({
+  cold = false,
+  clock = false,
+  people = false,
+}: { cold?: boolean; clock?: boolean; people?: boolean } = {}) {
   relatedFields
     .get('result')
     .get(K.type_option)
     .get(String(FieldType.Formula))
     .set(K.expression, clock ? 'timestamp(now())' : 'prop("amount")');
+  if (people) {
+    field('person', 'Person', FieldType.Person, undefined, relatedFields);
+    const person = new Y.Map() as YDatabaseCell;
+
+    person.set(K.field_type, FieldType.Person);
+    person.set(K.data, JSON.stringify(['person-ada']));
+    relatedCells.set('person', person);
+  }
+
   cachedRelated = new Y.Doc({ guid: relatedDoc.guid }) as YDoc;
   if (!cold) Y.applyUpdate(cachedRelated, Y.encodeStateAsUpdate(relatedDoc));
   trackSourceUpdates(cachedRelated, 'metadataObservers');
@@ -319,9 +358,9 @@ function enableExternalSources({ cold = false, clock = false }: { cold?: boolean
       FieldType.Rollup,
       {
         relation_field_id: 'links',
-        target_field_id: 'result',
-        calculation_type: CalculationType.Sum,
-        show_as: RollupDisplayMode.Calculated,
+        target_field_id: people ? 'person' : 'result',
+        calculation_type: people ? CalculationType.Count : CalculationType.Sum,
+        show_as: people ? RollupDisplayMode.OriginalList : RollupDisplayMode.Calculated,
       },
     ],
   ] as const) {
@@ -348,6 +387,58 @@ function Committed() {
       {cell?.data ?? ''}
     </output>
   );
+}
+
+async function setMemberName(name: string) {
+  await db.workspace_member_profiles.put({
+    workspace_id: 'workspace',
+    user_uuid: 'person-ada',
+    person_id: 'person-ada',
+    uid: '9007199254740993',
+    name,
+    updated_at: Date.now(),
+    avatar_url: null,
+    cover_image_url: null,
+    custom_image_url: null,
+    description: null,
+    email: '',
+    role: 1,
+    invited: false,
+    last_mentioned_at: null,
+  });
+}
+
+// Observe ownership through the shared clock's public browser focus hook.
+// All formula consumers are closed before these preview-only scenarios.
+function trackClockSubscriptions() {
+  const add = window.addEventListener.bind(window);
+  const remove = window.removeEventListener.bind(window);
+  const listeners = new Set<EventListenerOrEventListenerObject>();
+
+  window.addEventListener = ((
+    name: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions
+  ) => {
+    if (name === 'focus' && listener) {
+      listeners.add(listener);
+      evidence.clockOwners = listeners.size;
+    }
+
+    add(name, listener, options);
+  }) as typeof window.addEventListener;
+  window.removeEventListener = ((
+    name: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions
+  ) => {
+    if (name === 'focus' && listener) {
+      listeners.delete(listener);
+      evidence.clockOwners = listeners.size;
+    }
+
+    remove(name, listener, options);
+  }) as typeof window.removeEventListener;
 }
 
 function Fixture() {
@@ -487,6 +578,8 @@ Object.assign(window, {
     fields,
     addClockFormula: () => field('clock', 'Clock', FieldType.Formula, 'timestamp(now())'),
     enableExternalSources,
+    setMemberName,
+    trackClockSubscriptions,
     holdSource: (kind: 'metadata' | 'row') => {
       holdNextSource = kind;
     },

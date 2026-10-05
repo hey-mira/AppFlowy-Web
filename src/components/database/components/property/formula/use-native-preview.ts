@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useDatabaseContext } from '@/application/database-yjs/context';
 import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/schema';
-import { useFormulaClock } from '@/application/database-yjs/formula/clock';
+import { subscribeFormulaClock } from '@/application/database-yjs/formula/clock';
 import {
   formulaHostRuntime,
   formulaSchemaUsesClock,
@@ -103,16 +103,32 @@ export function useNativeFormulaPreview({
   const [rowRevision, setRowRevision] = useState(0);
   const [externalRevision, setExternalRevision] = useState(0);
   const [externalClock, setExternalClock] = useState(false);
-  const clock = useFormulaClock(!history && (formulaSchemaUsesClock(schema, expression) || externalClock));
+  const [peopleRequired, setPeopleRequired] = useState(false);
+  const clockRequired = formulaSchemaUsesClock(schema, expression) || externalClock;
+  const [clockRevision, setClockRevision] = useState(0);
   const epoch = useRef(0);
   const [snapshot, setSnapshot] = useState<{ expression: string; rowId: string; outcome: NativeFormulaOutcome }>();
 
   useEffect(() => retainNativeSession(session), [session]);
   useEffect(() => {
-    // External Formula targets can discover a clock dependency while resolving
-    // Rollup inputs. Keep it across ticks, and rediscover it for a new source.
+    // Row and Rollup inputs discover clock/member dependencies while loading.
+    // Keep them across ticks, and rediscover them for a new source.
     setExternalClock(false);
+    setPeopleRequired(false);
   }, [context, expression, schema, row, rowId, externalRevision]);
+  useEffect(() => {
+    if (history || (!clockRequired && !peopleRequired)) return;
+    let lastPeopleTick = Date.now();
+
+    return subscribeFormulaClock(() => {
+      const now = Date.now();
+
+      if (clockRequired || (peopleRequired && now - lastPeopleTick >= 30_000)) {
+        lastPeopleTick = now;
+        setClockRevision((revision) => revision + 1);
+      }
+    });
+  }, [history, clockRequired, peopleRequired]);
   useEffect(() => {
     if (!row || history) return;
     const change = () => setRowRevision((revision) => revision + 1);
@@ -138,6 +154,9 @@ export function useNativeFormulaPreview({
       nativeFormulaEngines: new Map(),
       usesClock: () => {
         if (!history && current()) setExternalClock(true);
+      },
+      usesPeople: () => {
+        if (!history && current()) setPeopleRequired(true);
       },
       observe: (doc) => {
         if (history || !current() || observed.has(doc)) return;
@@ -286,7 +305,7 @@ export function useNativeFormulaPreview({
     valid,
     rowRevision,
     externalRevision,
-    clock,
+    clockRevision,
     fieldId,
   ]);
 
