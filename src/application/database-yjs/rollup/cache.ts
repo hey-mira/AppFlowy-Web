@@ -541,9 +541,9 @@ async function computeRollupCellValue(
     rollupOption.relation_field_id
   );
 
-  if (!relationField || Number(relationField.get(YjsDatabaseKey.type)) !== FieldType.Relation) {
-    return { value: '' };
-  }
+  if (!relationField) throw new Error(`Rollup relation property "${rollupOption.relation_field_id}" could not be found`);
+  if (Number(relationField.get(YjsDatabaseKey.type)) !== FieldType.Relation)
+    throw new Error(`Rollup source property "${rollupOption.relation_field_id}" must be a Relation`);
 
   const relationOption = parseRelationTypeOption(relationField);
 
