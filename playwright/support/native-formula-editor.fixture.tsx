@@ -4,10 +4,11 @@ import * as Y from 'yjs';
 
 import { FormulaCell } from '@/application/database-yjs/cell.type';
 import { DatabaseContext, DatabaseContextState } from '@/application/database-yjs/context';
-import { FieldType } from '@/application/database-yjs/database.type';
+import { CalculationType, FieldType, RollupDisplayMode } from '@/application/database-yjs/database.type';
 import { parseFormulaTypeOption } from '@/application/database-yjs/fields/formula/parse';
 import { markDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
 import { useCellSelector } from '@/application/database-yjs/selector';
+import { SyncContext } from '@/application/services/js-services/sync-protocol';
 import {
   YDatabase,
   YDatabaseCell,
@@ -38,6 +39,17 @@ const evidence = {
   replies: [] as Array<{ worker: number; method: string; value: unknown }>,
   observed: [] as Array<{ source: string; preview: string; diagnostics: string }>,
   pageErrors: [] as string[],
+  external: {
+    bindings: 0,
+    releases: 0,
+    owners: 0,
+    metadataLoads: 0,
+    rowLoads: 0,
+    metadataObservers: 0,
+    rowObservers: 0,
+    pendingSources: 0,
+    sourceReturns: 0,
+  },
 };
 
 function snapshot(value: unknown): unknown {
@@ -102,7 +114,7 @@ databaseDoc.getMap(E.data_section).set(E.database, database);
 database.set(K.id, 'database');
 database.set(K.fields, fields);
 
-function field(id: string, name: string, type: FieldType, expression?: string) {
+function field(id: string, name: string, type: FieldType, expression?: string, target = fields) {
   const value = new Y.Map() as YDatabaseField;
 
   value.set(K.id, id);
@@ -117,7 +129,7 @@ function field(id: string, name: string, type: FieldType, expression?: string) {
     value.set(K.type_option, options);
   }
 
-  fields.set(id, value);
+  target.set(id, value);
   return value;
 }
 
@@ -180,6 +192,151 @@ const historyRows = Object.fromEntries(
 Y.applyUpdate(historyDoc, Y.encodeStateAsUpdate(databaseDoc));
 markDatabaseHistoryDocumentImmutable(historyDoc);
 
+const relatedDoc = new Y.Doc({ guid: 'preview-related' }) as YDoc;
+const relatedDatabase = new Y.Map() as YDatabase;
+const relatedFields = new Y.Map() as YDatabaseFields;
+const relatedViews = new Y.Map() as YDatabaseViews;
+const relatedView = new Y.Map() as YDatabaseView;
+const relatedRow = new Y.Doc() as YDoc;
+const relatedRowData = new Y.Map() as YDatabaseRow;
+const relatedCells = new Y.Map() as YDatabaseCells;
+
+relatedDoc.getMap(E.data_section).set(E.database, relatedDatabase);
+relatedDatabase.set(K.id, relatedDoc.guid);
+relatedDatabase.set(K.fields, relatedFields);
+relatedDatabase.set(K.views, relatedViews);
+relatedView.set(K.id, relatedDoc.guid);
+relatedView.set(K.row_orders, Y.Array.from([{ id: 'task', height: 44 }]));
+relatedViews.set(relatedDoc.guid, relatedView);
+field('title', 'Task', FieldType.RichText, undefined, relatedFields).set(K.is_primary, true);
+field('amount', 'Amount', FieldType.Number, undefined, relatedFields);
+field('result', 'Result', FieldType.Formula, 'prop("amount")', relatedFields);
+relatedRow.getMap(E.data_section).set(E.database_row, relatedRowData);
+relatedRowData.set(K.id, 'task');
+relatedRowData.set(K.cells, relatedCells);
+for (const [id, type, data] of [
+  ['title', FieldType.RichText, 'Task'],
+  ['amount', FieldType.Number, '6'],
+] as const) {
+  const cell = new Y.Map() as YDatabaseCell;
+
+  cell.set(K.field_type, type);
+  cell.set(K.data, data);
+  relatedCells.set(id, cell);
+}
+
+// Instrument the public Yjs subscription boundary, so a late provider reply
+// cannot silently reopen update listeners after Cancel or a newer edit.
+function trackSourceUpdates(doc: YDoc, key: 'metadataObservers' | 'rowObservers') {
+  const on = doc.on.bind(doc);
+  const off = doc.off.bind(doc);
+  const listeners = new Set<unknown>();
+
+  doc.on = (name, listener) => {
+    if (name === 'update') {
+      listeners.add(listener);
+      evidence.external[key] = listeners.size;
+    }
+
+    return on(name, listener);
+  };
+
+  doc.off = (name, listener) => {
+    if (name === 'update') {
+      listeners.delete(listener);
+      evidence.external[key] = listeners.size;
+    }
+
+    return off(name, listener);
+  };
+}
+
+let cachedRelated = new Y.Doc({ guid: relatedDoc.guid }) as YDoc;
+let holdNextSource: 'metadata' | 'row' | undefined;
+const pendingSources: Array<() => void> = [];
+const forwardMetadata = (update: Uint8Array) => Y.applyUpdate(cachedRelated, update);
+
+trackSourceUpdates(relatedRow, 'rowObservers');
+function sourceReply(kind: 'metadata' | 'row', doc: YDoc) {
+  return new Promise<YDoc>((resolve) => {
+    const reply = () => {
+      evidence.external.sourceReturns += 1;
+      resolve(doc);
+    };
+
+    if (holdNextSource === kind) {
+      holdNextSource = undefined;
+      pendingSources.push(reply);
+      evidence.external.pendingSources = pendingSources.length;
+    } else reply();
+  });
+}
+
+const externalLoaders: Partial<DatabaseContextState> = {
+  getViewIdFromDatabaseId: async (id) => id,
+  loadView: async () => {
+    evidence.external.metadataLoads += 1;
+    return sourceReply('metadata', cachedRelated);
+  },
+  createRow: async () => {
+    evidence.external.rowLoads += 1;
+    return sourceReply('row', relatedRow);
+  },
+  bindViewSync: (doc, options) => {
+    if (doc !== cachedRelated || !options?.retain) throw new Error('Preview metadata sync was not retained');
+    evidence.external.bindings += 1;
+    if (evidence.external.owners++ === 0) relatedDoc.on('update', forwardMetadata);
+    // A cold metadata-only document becomes hydrated by its retained sync.
+    Y.applyUpdate(cachedRelated, Y.encodeStateAsUpdate(relatedDoc));
+    return { doc } as SyncContext;
+  },
+  scheduleDeferredCleanup: (id) => {
+    if (id !== cachedRelated.guid || evidence.external.owners <= 0) throw new Error(`Unexpected preview release ${id}`);
+    evidence.external.releases += 1;
+    if (--evidence.external.owners === 0) relatedDoc.off('update', forwardMetadata);
+  },
+};
+
+function enableExternalSources({ cold = false, clock = false }: { cold?: boolean; clock?: boolean } = {}) {
+  relatedFields
+    .get('result')
+    .get(K.type_option)
+    .get(String(FieldType.Formula))
+    .set(K.expression, clock ? 'timestamp(now())' : 'prop("amount")');
+  cachedRelated = new Y.Doc({ guid: relatedDoc.guid }) as YDoc;
+  if (!cold) Y.applyUpdate(cachedRelated, Y.encodeStateAsUpdate(relatedDoc));
+  trackSourceUpdates(cachedRelated, 'metadataObservers');
+  const links = field('links', 'Links', FieldType.Relation);
+  const rollup = field('rollup', 'Rollup', FieldType.Rollup);
+
+  for (const [target, type, values] of [
+    [links, FieldType.Relation, { database_id: relatedDoc.guid }],
+    [
+      rollup,
+      FieldType.Rollup,
+      {
+        relation_field_id: 'links',
+        target_field_id: 'result',
+        calculation_type: CalculationType.Sum,
+        show_as: RollupDisplayMode.Calculated,
+      },
+    ],
+  ] as const) {
+    const options = new Y.Map();
+    const option = new Y.Map();
+
+    Object.entries(values).forEach(([key, value]) => option.set(key, value));
+    options.set(String(type), option);
+    target.set(K.type_option, options);
+  }
+
+  const cell = new Y.Map() as YDatabaseCell;
+
+  cell.set(K.field_type, FieldType.Relation);
+  cell.set(K.data, Y.Array.from(['task']));
+  (rowDocs.alpha.getMap(E.data_section).get(E.database_row) as YDatabaseRow).get(K.cells).set('links', cell);
+}
+
 function Committed() {
   const cell = useCellSelector({ rowId: 'alpha', fieldId: 'total' }) as FormulaCell | undefined;
 
@@ -204,6 +361,7 @@ function Fixture() {
       readOnly: history,
       workspaceId: 'workspace',
       rowMap: history ? historyRows : rowDocs,
+      ...(!history ? externalLoaders : {}),
       ...(history ? { dataSource: { type: 'history' as const, id: 'snapshot' } } : {}),
     }),
     [history]
@@ -317,7 +475,26 @@ function Fixture() {
   );
 }
 
-Object.assign(window, { editorEvidence: evidence, editorFixture: { databaseDoc, historyDoc, rowDocs, fields } });
+Object.assign(window, {
+  editorEvidence: evidence,
+  editorFixture: {
+    databaseDoc,
+    historyDoc,
+    rowDocs,
+    fields,
+    addClockFormula: () => field('clock', 'Clock', FieldType.Formula, 'timestamp(now())'),
+    enableExternalSources,
+    holdSource: (kind: 'metadata' | 'row') => {
+      holdNextSource = kind;
+    },
+    releaseSource: () => {
+      pendingSources.shift()?.();
+      evidence.external.pendingSources = pendingSources.length;
+    },
+    setRemoteExpression: (expression: string) =>
+      relatedFields.get('result').get(K.type_option).get(String(FieldType.Formula)).set(K.expression, expression),
+  },
+});
 createRoot(document.getElementById('root')!).render(
   <Suspense fallback='Loading editor'>
     {new URLSearchParams(location.search).has('strict') ? (

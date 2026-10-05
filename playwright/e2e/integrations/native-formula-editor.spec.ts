@@ -14,7 +14,31 @@ type Evidence = {
   held: boolean;
   requests: Array<{ worker: number; method: string; args: unknown[] }>;
   observed: Array<{ source: string; preview: string; diagnostics: string }>;
+  external: {
+    bindings: number;
+    releases: number;
+    owners: number;
+    metadataObservers: number;
+    rowObservers: number;
+    pendingSources: number;
+    sourceReturns: number;
+  };
 };
+
+type ExternalPreviewFixture = {
+  enableExternalSources: (options?: { cold?: boolean; clock?: boolean }) => void;
+  holdSource: (kind: 'metadata' | 'row') => void;
+  releaseSource: () => void;
+  setRemoteExpression: (expression: string) => void;
+};
+
+async function enableExternalPreview(page: Page, options: { cold?: boolean; clock?: boolean } = {}) {
+  await page.getByRole('button', { name: 'Close consumers', exact: true }).click();
+  await page.evaluate((options) => {
+    (window as unknown as { editorFixture: ExternalPreviewFixture }).editorFixture.enableExternalSources(options);
+  }, options);
+  await expect(page.getByTestId('formula-catalogue-property-rollup')).toBeVisible();
+}
 
 const evidence = (page: Page) => page.evaluate(() => (window as unknown as { editorEvidence: Evidence }).editorEvidence);
 
@@ -520,4 +544,141 @@ test('catalogue and examples insert at the Slate selection and preserve undo', a
   await expect(page.getByTestId('formula-preview-value')).toHaveText('100');
   await input.press('ControlOrMeta+z');
   await expect(input).toHaveAttribute('data-value', '3 + prop("other")');
+});
+
+for (const source of ['timestamp(now/* clock */())', 'prop("clock")']) {
+  test(`candidate preview keeps ticking for ${source}`, async ({ page }) => {
+    await page.clock.install({ time: new Date('1970-01-01T00:00:01Z') });
+    await page.clock.setFixedTime(new Date('1970-01-01T00:00:01Z'));
+    await page.getByRole('button', { name: 'Close consumers', exact: true }).click();
+    if (source === 'prop("clock")') {
+      await page.evaluate(() => {
+        (window as unknown as { editorFixture: { addClockFormula: () => void } }).editorFixture.addClockFormula();
+      });
+      await expect(page.getByTestId('formula-catalogue-property-clock')).toBeVisible();
+    }
+
+    await replaceSource(page.getByTestId('formula-editor-input'), source);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('1000');
+    await page.clock.setFixedTime(new Date('1970-01-01T00:00:03Z'));
+    await page.clock.fastForward(1100);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('3000');
+    await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+    await page.getByTestId('formula-editor-cancel').click();
+    await expect(page.getByTestId('formula-editor')).toHaveCount(0);
+    await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+  });
+}
+
+// The editor is the only consumer of this related metadata snapshot. Remote
+// Yjs updates arrive only while its public sync transport has a retained owner.
+test('candidate preview retains realtime metadata until its external dependency is removed', async ({ page }) => {
+  await enableExternalPreview(page);
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("rollup")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('6');
+  await page.evaluate(() => {
+    (window as unknown as { editorFixture: ExternalPreviewFixture }).editorFixture.setRemoteExpression(
+      'prop("amount") * 2'
+    );
+  });
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('12');
+  await expect.poll(async () => (await evidence(page)).external.owners).toBe(1);
+  await expect(input).toHaveAttribute('data-value', 'prop("rollup")');
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+  await replaceSource(input, '42');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('42');
+  await expect.poll(async () => (await evidence(page)).external.owners).toBe(0);
+  await expect.poll(async () => (await evidence(page)).external.metadataObservers).toBe(0);
+  await expect.poll(async () => (await evidence(page)).external.rowObservers).toBe(0);
+  await page.evaluate(() => {
+    (window as unknown as { editorFixture: ExternalPreviewFixture }).editorFixture.setRemoteExpression('99');
+  });
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('42');
+  await page.getByTestId('formula-editor-cancel').click();
+  await expect
+    .poll(async () => {
+      const state = await evidence(page);
+
+      return state.workers === state.terminated && state.external.bindings === state.external.releases;
+    })
+    .toBe(true);
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+});
+
+test('candidate preview binds cold metadata before waiting for hydration and releases on Cancel', async ({ page }) => {
+  await enableExternalPreview(page, { cold: true });
+  await replaceSource(page.getByTestId('formula-editor-input'), 'prop("rollup")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('6');
+  await expect.poll(async () => (await evidence(page)).external.owners).toBe(1);
+  await page.getByTestId('formula-editor-cancel').click();
+  await expect.poll(async () => (await evidence(page)).external.owners).toBe(0);
+  await expect.poll(async () => (await evidence(page)).external.metadataObservers).toBe(0);
+  await expect.poll(async () => (await evidence(page)).external.rowObservers).toBe(0);
+  await expect
+    .poll(async () => {
+      const state = await evidence(page);
+
+      return state.workers === state.terminated && state.external.bindings === state.external.releases;
+    })
+    .toBe(true);
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+});
+
+for (const kind of ['metadata', 'row'] as const) {
+  test(`late ${kind} loader cannot attach preview observers after ${
+    kind === 'row' ? 'Cancel' : 'a newer edit'
+  }`, async ({ page }) => {
+    await enableExternalPreview(page);
+    await page.evaluate((kind) => {
+      (window as unknown as { editorFixture: ExternalPreviewFixture }).editorFixture.holdSource(kind);
+    }, kind);
+    await replaceSource(page.getByTestId('formula-editor-input'), 'prop("rollup")');
+    await expect.poll(async () => (await evidence(page)).external.pendingSources).toBe(1);
+    if (kind === 'row') {
+      await expect.poll(async () => (await evidence(page)).external.metadataObservers).toBe(1);
+      await page.getByTestId('formula-editor-cancel').click();
+      await expect(page.getByTestId('formula-editor')).toHaveCount(0);
+    } else {
+      await replaceSource(page.getByTestId('formula-editor-input'), '42');
+      await expect(page.getByTestId('formula-preview-value')).toHaveText('42');
+    }
+
+    const returns = (await evidence(page)).external.sourceReturns;
+
+    await page.evaluate(() => {
+      (window as unknown as { editorFixture: ExternalPreviewFixture }).editorFixture.releaseSource();
+    });
+    await expect.poll(async () => (await evidence(page)).external.sourceReturns).toBe(returns + 1);
+    await expect.poll(async () => (await evidence(page)).external.metadataObservers).toBe(0);
+    await expect.poll(async () => (await evidence(page)).external.rowObservers).toBe(0);
+    await expect.poll(async () => (await evidence(page)).external.owners).toBe(0);
+    if (kind === 'metadata') {
+      await expect(page.getByTestId('formula-preview-value')).toHaveText('42');
+      await page.getByTestId('formula-editor-cancel').click();
+    }
+
+    await expect
+      .poll(async () => {
+        const state = await evidence(page);
+
+        return state.workers === state.terminated && state.external.bindings === state.external.releases;
+      })
+      .toBe(true);
+    await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+  });
+}
+
+test('candidate preview keeps ticking for an external Formula through Rollup', async ({ page }) => {
+  await page.clock.install({ time: new Date('1970-01-01T00:00:01Z') });
+  await page.clock.setFixedTime(new Date('1970-01-01T00:00:01Z'));
+  await enableExternalPreview(page, { clock: true });
+  await replaceSource(page.getByTestId('formula-editor-input'), 'prop("rollup")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('1000');
+  await page.clock.setFixedTime(new Date('1970-01-01T00:00:03Z'));
+  await page.clock.fastForward(1100);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('3000');
+  await page.getByTestId('formula-editor-cancel').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
 });

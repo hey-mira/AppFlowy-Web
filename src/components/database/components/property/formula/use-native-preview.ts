@@ -5,6 +5,7 @@ import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/sc
 import { useFormulaClock } from '@/application/database-yjs/formula/clock';
 import {
   formulaHostRuntime,
+  formulaSchemaUsesClock,
   nativeBatchColumns,
   resolveNativeRowInputs,
 } from '@/application/database-yjs/formula/native-session';
@@ -19,6 +20,7 @@ import {
   enterComputedCell,
   releaseComputedFormulaEngines,
 } from '@/application/database-yjs/rollup/computed';
+import { retainRollupSource } from '@/application/database-yjs/rollup/source-sync';
 import { YDatabase, YDatabaseRow, YDoc, YjsDatabaseKey as K, YjsEditorKey as E } from '@/application/types';
 
 import { nativeEditorProperties, retainNativeSession } from './native-editor';
@@ -100,11 +102,17 @@ export function useNativeFormulaPreview({
   }, [context.databaseDoc]);
   const [rowRevision, setRowRevision] = useState(0);
   const [externalRevision, setExternalRevision] = useState(0);
-  const clock = useFormulaClock(!history && /\b(?:now|today)\s*\(/.test(expression));
+  const [externalClock, setExternalClock] = useState(false);
+  const clock = useFormulaClock(!history && (formulaSchemaUsesClock(schema, expression) || externalClock));
   const epoch = useRef(0);
   const [snapshot, setSnapshot] = useState<{ expression: string; rowId: string; outcome: NativeFormulaOutcome }>();
 
   useEffect(() => retainNativeSession(session), [session]);
+  useEffect(() => {
+    // External Formula targets can discover a clock dependency while resolving
+    // Rollup inputs. Keep it across ticks, and rediscover it for a new source.
+    setExternalClock(false);
+  }, [context, expression, schema, row, rowId, externalRevision]);
   useEffect(() => {
     if (!row || history) return;
     const change = () => setRowRevision((revision) => revision + 1);
@@ -117,20 +125,78 @@ export function useNativeFormulaPreview({
     const revision = ++epoch.current;
     const controller = new AbortController();
     const observed = new Map<YDoc, () => void>();
+    const metadataDocuments = new WeakSet<YDoc>();
+    const current = () => revision === epoch.current && !controller.signal.aborted;
+    const checkCurrent = () => {
+      if (!current()) throw new DOMException('Formula preview cancelled', 'AbortError');
+    };
+
     const resources: ComputedSession = {
       path: new Set(),
       now: history ? historyNow : Date.now(),
       signal: controller.signal,
       nativeFormulaEngines: new Map(),
+      usesClock: () => {
+        if (!history && current()) setExternalClock(true);
+      },
       observe: (doc) => {
-        if (history || observed.has(doc)) return;
-        const listener = () => setExternalRevision((value) => value + 1);
+        if (history || !current() || observed.has(doc)) return;
+        const listener = () => {
+          if (current()) setExternalRevision((value) => value + 1);
+        };
 
-        observed.set(doc, listener);
+        let release: (() => void) | undefined;
+        const cleanup = () => {
+          doc.off('update', listener);
+          release?.();
+        };
+
+        observed.set(doc, cleanup);
         doc.on('update', listener);
+        try {
+          if (metadataDocuments.has(doc)) release = retainRollupSource(context, doc);
+        } catch (error) {
+          cleanup();
+          observed.delete(doc);
+          throw error;
+        }
+
+        if (!current()) {
+          cleanup();
+          observed.delete(doc);
+        }
       },
     };
-    const current = () => revision === epoch.current && !controller.signal.aborted;
+    const loadView = context.loadView;
+    const createRow = context.createRow;
+    const loaders: typeof context = {
+      ...context,
+      loadView: loadView
+        ? async (...args) => {
+            checkCurrent();
+            const doc = await loadView(...args);
+
+            checkCurrent();
+            if (doc) {
+              // Metadata-only snapshots need sync before cold hydration;
+              // identify them by the loader, rather than their current payload.
+              metadataDocuments.add(doc);
+              resources.observe?.(doc);
+            }
+
+            return doc;
+          }
+        : undefined,
+      createRow: createRow
+        ? async (...args) => {
+            checkCurrent();
+            const doc = await createRow(...args);
+
+            checkCurrent();
+            return doc;
+          }
+        : undefined,
+    };
     const publish = (outcome: NativeFormulaOutcome) => {
       if (current()) setSnapshot({ expression, rowId, outcome });
     };
@@ -166,7 +232,7 @@ export function useNativeFormulaPreview({
             rowId,
             history,
             rows: context.rowMap ?? undefined,
-            loaders: context,
+            loaders,
           },
           inputs,
           guarded,
@@ -204,7 +270,8 @@ export function useNativeFormulaPreview({
     return () => {
       controller.abort();
       clearTimeout(timer);
-      observed.forEach((listener, doc) => doc.off('update', listener));
+      observed.forEach((cleanup) => cleanup());
+      observed.clear();
       releaseComputedFormulaEngines(resources);
     };
   }, [
