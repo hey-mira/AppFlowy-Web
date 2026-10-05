@@ -1,51 +1,67 @@
+import { createFormulaEngineClient } from '@notion-formula/sdk';
+
 import { FieldType } from '@/application/database-yjs/database.type';
 import { parseRollupTypeOption } from '@/application/database-yjs/fields/rollup/parse';
+import { nativePropertyDefinition } from '@/application/database-yjs/formula/native-values';
 
-import { collectPropRefs } from './ast';
-import { parseFormulaTypeOption } from './parse';
-import { parseFormula } from './parser';
-import { FormulaFieldSchema, resolveFormulaField } from './schema';
+import { FormulaFieldSchema } from './schema';
 
-/** Formula fields affected by deleting a property in this database, including indirect dependencies. */
-export function collectDependentFormulaFields(schema: FormulaFieldSchema[], fieldId: string): FormulaFieldSchema[] {
-  const dependents = new Map<string, Set<string>>();
-  const addDependency = (sourceId: string, dependentId: string) => {
-    let entries = dependents.get(sourceId);
+/** Inspect deletion on a private native Engine; the committed Engine stays intact. */
+export async function collectDependentFormulaFields(
+  schema: FormulaFieldSchema[],
+  fieldId: string,
+  { signal }: { signal?: AbortSignal } = {}
+): Promise<FormulaFieldSchema[]> {
+  if (!schema.some((entry) => entry.id === fieldId)) return [];
+  // Capture mutable Yjs options before crossing the Worker boundary.
+  const properties = schema.map(nativePropertyDefinition);
+  const rollups = new Map<string, string[]>();
 
-    if (!entries) {
-      entries = new Set();
-      dependents.set(sourceId, entries);
-    }
+  for (const entry of schema) {
+    if (entry.type !== FieldType.Rollup) continue;
+    const relationId = parseRollupTypeOption(entry.field)?.relation_field_id;
 
-    entries.add(dependentId);
+    if (relationId) rollups.set(relationId, [...(rollups.get(relationId) ?? []), entry.id]);
+  }
+
+  const engine = await createFormulaEngineClient({ properties });
+  const close = () => {
+    void engine.close().catch(() => undefined);
   };
 
-  schema.forEach((entry) => {
-    if (entry.type === FieldType.Rollup) {
-      const relationId = parseRollupTypeOption(entry.field)?.relation_field_id;
+  const cancelled = () => {
+    if (signal?.aborted) throw new DOMException('Formula dependency check was cancelled', 'AbortError');
+  };
 
-      if (relationId) addDependency(relationId, entry.id);
+  signal?.addEventListener('abort', close, { once: true });
+  try {
+    cancelled();
+    const affected = new Set([fieldId]);
+    const removals = [fieldId];
+    const scheduled = new Set(removals);
+
+    for (const id of removals) {
+      cancelled();
+      const mutation = await engine.remove(id);
+
+      cancelled();
+      mutation?.affected_formulas.forEach((dependentId) => affected.add(dependentId));
+      // Native edges are transitive. Only host Relation→Rollup edges need
+      // synthetic removals to continue that closure through computed inputs.
+      for (const affectedId of affected) {
+        for (const rollupId of rollups.get(affectedId) ?? []) {
+          affected.add(rollupId);
+          if (!scheduled.has(rollupId)) {
+            scheduled.add(rollupId);
+            removals.push(rollupId);
+          }
+        }
+      }
     }
 
-    if (entry.type !== FieldType.Formula) return;
-    try {
-      // Parse independently of type checking: an already invalid formula may
-      // still reference the property being deleted. Strings/comments aren't references.
-      const ast = parseFormula(parseFormulaTypeOption(entry.field).formula);
-
-      collectPropRefs(ast).forEach((ref) => {
-        const dependency = resolveFormulaField(schema, ref);
-
-        if (dependency) addDependency(dependency.id, entry.id);
-      });
-    } catch {
-      // Incomplete expressions have no reliable dependency tree.
-    }
-  });
-
-  const affected = new Set([fieldId]);
-
-  // Set iteration also visits entries added during traversal, once each.
-  affected.forEach((id) => dependents.get(id)?.forEach((dependentId) => affected.add(dependentId)));
-  return schema.filter((entry) => entry.id !== fieldId && entry.type === FieldType.Formula && affected.has(entry.id));
+    return schema.filter((entry) => entry.id !== fieldId && entry.type === FieldType.Formula && affected.has(entry.id));
+  } finally {
+    signal?.removeEventListener('abort', close);
+    await engine.close();
+  }
 }
