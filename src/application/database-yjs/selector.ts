@@ -1,4 +1,3 @@
-import { useDatabaseDependencyRestoreRevision } from '@/application/database-yjs/restore-dependencies';
 import dayjs from 'dayjs';
 import { debounce } from 'lodash-es';
 import {
@@ -31,20 +30,14 @@ import {
 import { decodeCellToText } from '@/application/database-yjs/decode';
 import {
   collectFormulaExternalReferences,
-  compileFormula,
   evaluateFormulaCell,
-  FormulaExternalReferences,
-  FormulaFieldSchema,
   FormulaType,
   getDateCellStr,
   getFieldDateTimeFormats,
   getTypeOptions,
   NO_EXTERNAL_REFERENCES,
-  parseFormulaTypeOption,
-  parseFormulaVisualizationOption,
   parsePersonTypeOptions,
   readFormulaSchema,
-  readFormulaSchemaForVersion,
   parseRelationTypeOption,
   parseRollupTypeOption,
   parseRollupVisualizationOption,
@@ -58,14 +51,14 @@ import {
   hasEffectiveFilters,
   parseFilter,
 } from '@/application/database-yjs/filter';
+import { useFormulaClock } from '@/application/database-yjs/formula/clock';
+import { nativeFormulaOutcome, useNativeFormulaRuntime } from '@/application/database-yjs/formula/native-runtime';
+import { nativePropertyType, projectNativeFormulaCell, projectNativeFormulaResult } from '@/application/database-yjs/formula/native-values';
 import {
-  formulaConditionContext,
   formulaRowContext,
   historicalFormulaRowContext,
   memberNames,
-  useFormulaReadContext,
 } from '@/application/database-yjs/formula/read-context';
-import { useFormulaClock } from '@/application/database-yjs/formula/clock';
 import { FormulaRowSources, useFormulaRelationTitles } from '@/application/database-yjs/formula/useFormulaRelationTitles';
 import { DEFAULT_GALLERY_LAYOUT_SETTINGS } from '@/application/database-yjs/gallery-layout';
 import {
@@ -102,10 +95,9 @@ import {
   subscribeRelationCache,
   subscribeRelationGroupLabels,
 } from '@/application/database-yjs/relation/cache';
-import { observeRollupCell } from '@/application/database-yjs/rollup/observe';
-import { retainRollupSource } from '@/application/database-yjs/rollup/source-sync';
 import { getRelationRowIdsFromCell } from '@/application/database-yjs/relation/cell';
 import { readHistoricalRelationText } from '@/application/database-yjs/relation/history';
+import { useDatabaseDependencyRestoreRevision } from '@/application/database-yjs/restore-dependencies';
 import {
   invalidateRollupCell,
   readRollupCell,
@@ -114,6 +106,8 @@ import {
   subscribeRollupCell,
   subscribeRollupCache,
 } from '@/application/database-yjs/rollup/cache';
+import { observeRollupCell } from '@/application/database-yjs/rollup/observe';
+import { retainRollupSource } from '@/application/database-yjs/rollup/source-sync';
 import { getInlineViewRowOrders, materializeVisibleRowOrders } from '@/application/database-yjs/row-order-visibility';
 import { getMetaJSON, getRowKey } from '@/application/database-yjs/row_meta';
 import { subscribeSharedYjsDeep } from '@/application/database-yjs/shared-yjs-observer';
@@ -236,11 +230,6 @@ function getComputedConditionFieldIds(sorts?: YDatabaseSorts, filters?: YDatabas
       relationFieldIds.add(fieldId);
     } else if (fieldType === FieldType.Rollup) {
       rollupFieldIds.add(fieldId);
-    } else if (fieldType === FieldType.Formula) {
-      const references = collectFormulaExternalReferences(fields.get(fieldId), readFormulaSchema(fields));
-
-      references.relations.forEach((entry) => relationFieldIds.add(entry.id));
-      references.rollups.forEach((entry) => rollupFieldIds.add(entry.id));
     }
   });
 
@@ -2260,32 +2249,31 @@ export function useTimelineGroupingSelector(): DatabaseGrouping {
   return useDatabaseGroupingSelector(DatabaseViewLayout.Timeline);
 }
 
-/** Formula fields the view's sorts and effective filters refer to. */
+/** Formula conditions must start their runtime before their native types are known. */
 function conditionFormulaFields(
   fields: YDatabaseFields | undefined,
   sorts: YDatabaseSorts | undefined,
   filters: YDatabaseFilters | undefined
 ): YDatabaseField[] {
   if (!fields || !(sorts?.length || filters?.length)) return [];
-  return Array.from(getConditionFieldIds(sorts, filters, fields))
-    .map((fieldId) => fields.get(fieldId))
-    .filter((field): field is YDatabaseField => Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula);
-}
+  const ids = new Set<string>();
 
-/** What the given formula conditions read from outside the rows. */
-function formulaConditionExternalReferences(
-  formulas: YDatabaseField[],
-  schema: FormulaFieldSchema[]
-): FormulaExternalReferences {
-  if (formulas.length === 0) return NO_EXTERNAL_REFERENCES;
-  const references = formulas.map((field) => collectFormulaExternalReferences(field, schema));
+  sorts?.forEach((sort) => { const id = sort.get(YjsDatabaseKey.field_id);
 
-  return {
-    clock: references.some((entry) => entry.clock),
-    people: references.some((entry) => entry.people),
-    relations: references.flatMap((entry) => entry.relations),
-    rollups: references.flatMap((entry) => entry.rollups),
+ if (id) ids.add(id); });
+  const visit = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    const node = value as Record<string, unknown>;
+    const id = node[YjsDatabaseKey.field_id];
+    const children = node[YjsDatabaseKey.children];
+
+    if (typeof id === 'string') ids.add(id);
+    if (Array.isArray(children)) children.forEach(visit);
   };
+
+  (filters?.toJSON() as unknown[] | undefined)?.forEach(visit);
+  return Array.from(ids).map((id) => fields.get(id))
+    .filter((field): field is YDatabaseField => Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula);
 }
 
 /**
@@ -2329,26 +2317,9 @@ export function useRowOrdersSelector() {
 
       return fieldType === FieldType.CreatedBy || fieldType === FieldType.LastEditedBy;
     }) ?? false;
-  // Formula conditions can read member names, related titles and rollups.
   const conditionFormulas = conditionFormulaFields(fields, sorts, filters);
-  const conditionFormulaKey = conditionFormulas.map((field) => String(field.get(YjsDatabaseKey.id))).join(',');
-  // Their references change with the formulas' expressions (and the fields they reach).
-  const conditionFieldsVersion = useDatabaseFieldsVersion(conditionFormulaKey !== '');
-  const formulaConditionReferences = useMemo(
-    () => {
-      void conditionFieldsVersion;
-      const formulas = conditionFormulaKey
-        .split(',')
-        .map((fieldId) => fields?.get(fieldId))
-        .filter((field): field is YDatabaseField => Boolean(field));
-
-      return formulaConditionExternalReferences(formulas, readFormulaSchemaForVersion(fields, conditionFieldsVersion));
-    },
-    [fields, conditionFormulaKey, conditionFieldsVersion]
-  );
-  const { users: conditionMentionableUsers } = useMentionableUsersWithAutoFetch(
-    !isHistory && (hasAttributionSort || formulaConditionReferences.people)
-  );
+  const conditionFormulaIds = conditionFormulas.map((field) => String(field.get(YjsDatabaseKey.id)));
+  const { users: conditionMentionableUsers } = useMentionableUsersWithAutoFetch(!isHistory && hasAttributionSort);
   const attributionNameByUid = useMemo(() => {
     const names = new Map<string, string>();
 
@@ -2363,9 +2334,6 @@ export function useRowOrdersSelector() {
     return names;
   }, [conditionMentionableUsers, isHistory]);
   const attributionNameGetter = useCallback((uid: string) => attributionNameByUid.get(uid), [attributionNameByUid]);
-  const conditionMembers = useMemo(() => memberNames(isHistory ? [] : conditionMentionableUsers), [conditionMentionableUsers, isHistory]);
-  const conditionReadsRelatedTitles = formulaConditionReferences.relations.length > 0;
-  const formulaClock = useFormulaClock(!isHistory && formulaConditionReferences.clock);
 
   const [rowOrdersState, setRowOrdersState] = useState<{
     rows?: Row[];
@@ -2383,7 +2351,7 @@ export function useRowOrdersSelector() {
   const lastProcessedRowOrderTransactionRef = useRef<Transaction | null>(null);
 
   // Check if there are active conditions
-  const hasConditions = (sorts?.length ?? 0) > 0 || hasEffectiveFilters(filters, fields);
+  const hasConditions = (sorts?.length ?? 0) > 0 || hasEffectiveFilters(filters, fields) || conditionFormulaIds.length > 0;
 
   // Background loading of row docs for sorting/filtering
   const { cachedRowDocs } = useBackgroundRowDocLoader(hasConditions);
@@ -2407,7 +2375,9 @@ export function useRowOrdersSelector() {
   const rowDocsForConditions = useDeferredValue(rowDocsForConditionsRaw);
   const rowDocsForConditionsRef = useRef(rowDocsForConditions);
 
-  useFormulaRelationTitles(formulaConditionReferences.relations, { rows: rowDocsForConditions });
+  const nativeFormulaSnapshot = useNativeFormulaRuntime({
+    enabled: conditionFormulaIds.length > 0, rows: rowDocsForConditions, formulaIds: conditionFormulaIds,
+  });
 
   useEffect(() => {
     rowDocsForConditionsRef.current = rowDocsForConditions;
@@ -2579,21 +2549,14 @@ export function useRowOrdersSelector() {
     [rowDocsForConditions, fields, database, databaseDoc, loadView, createRow, getViewIdFromDatabaseId, workspaceId]
   );
 
-  const formulaContextGetter = useCallback(
-    (rowId: string) => {
-      if (isHistory) {
-        const row = rowDocsForConditions[rowId]?.getMap(YjsEditorKey.data_section).get(YjsEditorKey.database_row) as YDatabaseRow | undefined;
+  const formulaResultGetter = useCallback(
+    (rowId: string, fieldId: string) => {
+      const field = fields?.get(fieldId);
+      const outcome = nativeFormulaOutcome(nativeFormulaSnapshot, rowId, fieldId);
 
-        return historicalFormulaRowContext(rowId, row, { database, baseDoc: databaseDoc, rows: rowDocsForConditions });
-      }
-
-      return formulaConditionContext(rowId, {
-        members: conditionMembers,
-        loaders: { loadView, createRow, getViewIdFromDatabaseId },
-        getRollupValue: rollupValueGetter,
-      });
+      return field && outcome.status !== 'pending' ? projectNativeFormulaResult(outcome, field) : undefined;
     },
-    [conditionMembers, loadView, createRow, getViewIdFromDatabaseId, rollupValueGetter, isHistory, rowDocsForConditions, database, databaseDoc]
+    [fields, nativeFormulaSnapshot]
   );
 
   const rollupTextGetter = useCallback(
@@ -2696,6 +2659,30 @@ export function useRowOrdersSelector() {
       return;
     }
 
+    const formulaConditionsPending = conditionFormulaFields(fields, sorts, filters).some((field) =>
+      rowsWithDocs.some(({ id }) => nativeFormulaOutcome(nativeFormulaSnapshot, id, String(field.get(YjsDatabaseKey.id))).status === 'pending')
+    );
+
+    if (formulaConditionsPending) {
+      const sourceRowIds = new Set(originalRowOrders.map(({ id }) => id));
+
+      setRowOrdersState((previousState) => {
+        if (!filtersAppliedRef.current || previousState.conditionSignature !== conditionStateKey || !previousState.rows) {
+          return { rows: undefined, conditionSignature: conditionStateKey };
+        }
+
+        // Recalculation keeps the last complete result, while row_orders
+        // removals remain authoritative even before the Worker responds.
+        const retainedRows = previousState.rows.filter(({ id }) => sourceRowIds.has(id));
+
+        return retainedRows.length === previousState.rows.length
+          ? previousState
+          : { rows: retainedRows, conditionSignature: conditionStateKey };
+      });
+      logConditionCompute(rowsWithDocs.length);
+      return;
+    }
+
     let computedRowOrders: Row[] | undefined;
 
     if (sorts?.length) {
@@ -2703,7 +2690,7 @@ export function useRowOrdersSelector() {
         getRelationCellText: relationTextGetter,
         getRollupCellValue: rollupValueGetter,
         getAttributionName: attributionNameGetter,
-        getFormulaContext: formulaContextGetter,
+        getFormulaResult: formulaResultGetter,
       });
     }
 
@@ -2712,7 +2699,7 @@ export function useRowOrdersSelector() {
         getRelationCellText: relationTextGetter,
         getRollupCellText: rollupTextGetter,
         getRollupCellValue: rollupValueGetter,
-        getFormulaContext: formulaContextGetter,
+        getFormulaResult: formulaResultGetter,
       });
     }
 
@@ -2724,7 +2711,8 @@ export function useRowOrdersSelector() {
   }, [
     fields,
     attributionNameGetter,
-    formulaContextGetter,
+    formulaResultGetter,
+    nativeFormulaSnapshot,
     filters,
     rowDocsForConditions,
     sorts,
@@ -2739,7 +2727,7 @@ export function useRowOrdersSelector() {
   // Trigger computation when dependencies change
   useEffect(() => {
     onConditionsChange();
-  }, [conditionLoadRevision, onConditionsChange, formulaClock]);
+  }, [conditionLoadRevision, onConditionsChange]);
 
   // Subscribe to relation/rollup cache changes
   useEffect(() => {
@@ -2747,18 +2735,13 @@ export function useRowOrdersSelector() {
     const handleCacheChange = debounce(onConditionsChange, 200);
     const unsubscribeRelation = subscribeRelationCache(() => handleCacheChange());
     const unsubscribeRollup = subscribeRollupCache(() => handleCacheChange());
-    // Formula conditions read related row titles from the group-label cache.
-    const unsubscribeLabels = conditionReadsRelatedTitles
-      ? subscribeRelationGroupLabels(() => handleCacheChange())
-      : () => undefined;
 
     return () => {
       handleCacheChange.cancel();
       unsubscribeRelation();
       unsubscribeRollup();
-      unsubscribeLabels();
     };
-  }, [onConditionsChange, conditionReadsRelatedTitles, isHistory]);
+  }, [onConditionsChange, isHistory]);
 
   // Observe Yjs data changes
   useEffect(() => {
@@ -3237,12 +3220,7 @@ function useRollupCellValue({
   } as RollupCell;
 }
 
-/**
- * Formula cells are computed synchronously from the row's own cells, so the
- * value is derived during render and re-derived when the row's cells, the row
- * meta (created/edited time and actor) or any field in the schema changes —
- * other formulas, select option names and number formats all live on fields.
- */
+/** Formula cells subscribe to the database's batched native evaluation snapshot. */
 export function useFormulaCellValue({
   row,
   field,
@@ -3256,84 +3234,15 @@ export function useFormulaCellValue({
   fieldId: string;
   fieldClock: number;
 }): FormulaCell | undefined {
-  const fields = useDatabaseFields();
-  const { dataSource } = useDatabaseContext();
-  const isHistory = dataSource?.type === 'history';
-  const fieldType = Number(field?.get(YjsDatabaseKey.type)) as FieldType;
-  const isFormula = fieldType === FieldType.Formula;
-  // Every cell runs this hook; only formula cells watch the schema, so other
-  // cells do not re-render when any field is renamed or reconfigured.
-  const fieldsVersion = useDatabaseFieldsVersion(isFormula);
-  // The viewer's date and time formats are applied by FormulaCell, so the
-  // cells of other fields do not re-render when the user record changes.
-  const [rowClock, setRowClock] = useState(0);
-  // Ordinary cells must skip schema validation as well as its subscription.
-  const schema = useMemo(
-    () => (isFormula ? readFormulaSchemaForVersion(fields, fieldsVersion) : []),
-    [isFormula, fields, fieldsVersion]
-  );
-  const references = useMemo(() => {
-    void fieldClock;
-    return isFormula && field ? collectFormulaExternalReferences(field, schema) : NO_EXTERNAL_REFERENCES;
-  }, [isFormula, field, fieldClock, schema]);
-  const { context: readContext, revision: readRevision } = useFormulaReadContext({
-    references,
-    row,
-    rowId,
-    rowClock,
-  });
-
-  useEffect(() => {
-    if (!isFormula || !row || isHistory) return;
-    const bump = () => setRowClock((prev) => prev + 1);
-
-    // Observe through the row so replacing its cells map also keeps subsequent
-    // edits to the replacement subscribed, as happens during synchronization.
-    row.observeDeep(bump);
-
-    // Inputs may have changed since render, before these observers attached.
-    // Refresh once after subscribing so that gap cannot leave a stale value.
-    bump();
-
-    return () => {
-      row.unobserveDeep(bump);
-    };
-  }, [isFormula, row, isHistory]);
+  const isFormula = Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula;
+  const rows = useMemo(() => row?.doc ? { [rowId]: row.doc as YDoc } : undefined, [row?.doc, rowId]);
+  const snapshot = useNativeFormulaRuntime({ enabled: isFormula, rows, formulaIds: [fieldId] });
 
   return useMemo(() => {
-    if (!isFormula || !row || !field) return undefined;
-    // Recompute when the row or any field mutates even though the Yjs handles are stable.
-    void rowClock;
     void fieldClock;
-    void readRevision;
-    const typeOption = parseFormulaTypeOption(field);
-    const result = evaluateFormulaCell({
-      ...readContext,
-      schema,
-      field,
-      fieldId,
-      row,
-      rowId,
-      format: { numberFormat: typeOption.format },
-    });
-
-    return {
-      createdAt: 0,
-      lastModified: 0,
-      fieldType: FieldType.Formula,
-      data: result.text,
-      value: result.value,
-      resultType: result.resultType,
-      rawNumeric: result.rawNumeric,
-      rawBoolean: result.rawBoolean,
-      rawDate: result.rawDate,
-      error: result.error,
-      missingPropertyRef: result.missingPropertyRef,
-      isBlank: typeOption.formula.trim() === '',
-      numberFormat: typeOption.format,
-      visualization: parseFormulaVisualizationOption(typeOption),
-    };
-  }, [isFormula, row, field, rowClock, fieldClock, readRevision, readContext, schema, fieldId, rowId]);
+    if (!isFormula || !row || !field) return undefined;
+    return projectNativeFormulaCell(nativeFormulaOutcome(snapshot, rowId, fieldId), field);
+  }, [isFormula, row, field, fieldClock, snapshot, rowId, fieldId]);
 }
 
 /**
@@ -3357,21 +3266,11 @@ export function useCalculationFieldType(fieldId: string): FieldType {
  * Filters, sorts, the Calculate footer and the property menu key off this.
  */
 export function useFormulaResultType(fieldId: string): FormulaType {
-  const fields = useDatabaseFields();
-  const { field, clock } = useFieldSelector(fieldId);
+  const { field } = useFieldSelector(fieldId);
   const isFormula = Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula;
-  // Footers and filter menus call this for every column; only formulas depend on other fields.
-  const fieldsVersion = useDatabaseFieldsVersion(isFormula);
+  const snapshot = useNativeFormulaRuntime({ enabled: isFormula });
 
-  return useMemo(() => {
-    void clock;
-    if (!field || !isFormula) return 'any';
-    return compileFormula(
-      parseFormulaTypeOption(field).formula,
-      readFormulaSchemaForVersion(fields, fieldsVersion),
-      fieldId
-    ).resultType;
-  }, [field, isFormula, fields, fieldId, fieldsVersion, clock]);
+  return nativePropertyType(snapshot.properties.get(fieldId));
 }
 
 export function useCellSelector({ rowId, fieldId }: { rowId: string; fieldId: string }) {

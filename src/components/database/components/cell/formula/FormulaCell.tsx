@@ -2,8 +2,9 @@ import { lazy, Suspense, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { CellProps, FormulaCell as FormulaCellType } from '@/application/database-yjs/cell.type';
-import { formatFormulaValue, FormulaValue } from '@/application/database-yjs/fields/formula';
+import { FormulaValue } from '@/application/database-yjs/fields/formula';
 import { RollupShowAsType } from '@/application/database-yjs/fields/rollup/rollup.type';
+import { formatNativeFormulaValue } from '@/application/database-yjs/formula/native-values';
 import { DateFormat, TimeFormat } from '@/application/types';
 import { MetadataKey } from '@/application/user-metadata';
 import { ReactComponent as CheckboxCheckSvg } from '@/assets/icons/check_filled.svg';
@@ -35,7 +36,7 @@ function useFormulaDisplayText(cell?: FormulaCellType): string {
   return useMemo(() => {
     if (!cell) return '';
     if (cell.error || !cell.value || !containsDate(cell.value)) return cell.data ?? '';
-    return formatFormulaValue(cell.value, { numberFormat: cell.numberFormat, dateFormat, timeFormat });
+    return formatNativeFormulaValue(cell.value, { numberFormat: cell.numberFormat, dateFormat, timeFormat });
   }, [cell, dateFormat, timeFormat]);
 }
 
@@ -59,7 +60,7 @@ export function FormulaCell({
   const { t } = useTranslation();
   const value = useFormulaDisplayText(cell);
   const isMissingProperty = cell?.missingPropertyRef !== undefined;
-  const isBoolean = cell?.resultType === 'boolean' && !cell.error;
+  const isBoolean = cell?.resultType === 'boolean' && !cell.error && cell.evaluationState !== 'pending' && cell.evaluationState !== 'null';
   const visualization = cell?.visualization;
   const canVisualize =
     !isCardCell &&
@@ -78,7 +79,9 @@ export function FormulaCell({
 
   let content: React.ReactNode;
 
-  if (cell?.error) {
+  if (cell?.evaluationState === 'pending') {
+    content = <span aria-label={t('grid.formula.pending', { defaultValue: 'Calculating formula' })}>…</span>;
+  } else if (cell?.error) {
     content = (
       <Tooltip delayDuration={300}>
         <TooltipTrigger asChild>
@@ -133,6 +136,8 @@ export function FormulaCell({
       style={style}
       data-testid={`formula-cell-${rowId}-${fieldId}`}
       data-result-type={cell?.resultType}
+      data-evaluation-state={cell?.evaluationState}
+      data-error-source={cell?.errorSource}
       className={cn(
         // Not positioned: the editor anchors to the host cell (grid cell or row page value) around it.
         'formula-cell flex w-full items-center gap-1',

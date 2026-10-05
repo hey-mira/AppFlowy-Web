@@ -1,12 +1,12 @@
-import { FieldType, RollupDisplayMode, SortCondition } from '@/application/database-yjs/database.type';
 import {
   ConditionSortValue,
   getConditionSortValue,
   getRowConditionSnapshot,
 } from '@/application/database-yjs/condition-value-cache';
+import { FieldType, RollupDisplayMode, SortCondition } from '@/application/database-yjs/database.type';
 import { parseRollupTypeOption } from '@/application/database-yjs/fields';
-import { FormulaFieldSchema, ReadFieldValueContext, readFormulaSchema } from '@/application/database-yjs/fields/formula';
-import { evaluateFormulaForRow, formulaPredicateFieldType } from '@/application/database-yjs/formula/filter';
+import { FormulaCellResult } from '@/application/database-yjs/fields/formula';
+import { formulaPredicateFieldType } from '@/application/database-yjs/formula/filter';
 import { isNumericRollupField } from '@/application/database-yjs/rollup/utils';
 import { Row } from '@/application/database-yjs/selector';
 import { RowId, YDatabaseFields, YDatabaseSorts, YDoc, YjsDatabaseKey } from '@/application/types';
@@ -18,8 +18,8 @@ type SortOptions = {
   getRelationCellText?: (rowId: string, fieldId: string) => string;
   getRollupCellValue?: (rowId: string, fieldId: string) => { value: string; rawNumeric?: number };
   getAttributionName?: (uid: string) => string | undefined;
-  /** Member names, related titles and rollup results for formula sorts. */
-  getFormulaContext?: (rowId: string) => ReadFieldValueContext;
+  /** Shared native results; sorting never evaluates formulas itself. */
+  getFormulaResult?: (rowId: string, fieldId: string) => FormulaCellResult | undefined;
 };
 
 export function sortBy(
@@ -64,9 +64,6 @@ export function sortBy(
   // Prepare sort data, pre-calculate all values to avoid multiple calculations
   const rollupNumericCache = new Map<string, boolean>();
   const formulaPredicateCache = new Map<string, FieldType>();
-  // Formula sorts evaluate every row; read the schema once for the pass.
-  let formulaSchema: FormulaFieldSchema[] | undefined;
-  const getFormulaSchema = () => (formulaSchema ??= readFormulaSchema(fields));
   const sortData = rows.map((row) => {
     const values = sortArray.map((sort) => {
       const fieldId = sort.get(YjsDatabaseKey.field_id);
@@ -88,19 +85,9 @@ export function sortBy(
             return type;
           })();
         const defaultData = defaultValueForSort(predicateType, Number(sort.get(YjsDatabaseKey.condition)));
-        const snapshot = getRowConditionSnapshot(rowMetas[row.id]);
+        const result = options?.getFormulaResult?.(row.id, fieldId);
 
-        if (!snapshot) return defaultData;
-        const result = evaluateFormulaForRow(
-          field,
-          fieldId,
-          getFormulaSchema(),
-          snapshot.row,
-          row.id,
-          options?.getFormulaContext?.(row.id)
-        );
-
-        if (result.error) return defaultData;
+        if (!result || result.error) return defaultData;
 
         switch (predicateType) {
           case FieldType.Number:

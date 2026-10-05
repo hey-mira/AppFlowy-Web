@@ -2,8 +2,8 @@ import Big from 'big.js';
 
 import { parseYDatabaseCellToCell } from '@/application/database-yjs/cell.parse';
 import { DateTimeCell, RollupListItem } from '@/application/database-yjs/cell.type';
-import { CalculationType, FieldType, RollupDisplayMode } from '@/application/database-yjs/database.type';
 import { waitForDatabaseHydration } from '@/application/database-yjs/database.hydration';
+import { CalculationType, FieldType, RollupDisplayMode } from '@/application/database-yjs/database.type';
 import { decodeCellToText } from '@/application/database-yjs/decode';
 import { getDateCellStr, getRowTimeString } from '@/application/database-yjs/fields/date/utils';
 import { EnhancedBigStats } from '@/application/database-yjs/fields/number/EnhancedBigStats';
@@ -11,13 +11,13 @@ import { NumberFormat } from '@/application/database-yjs/fields/number/number.ty
 import { parseNumberTypeOptions, stringifyDesktopNumberValue } from '@/application/database-yjs/fields/number/parse';
 import { parseRelationTypeOption } from '@/application/database-yjs/fields/relation/parse';
 import { readRollupCondition } from '@/application/database-yjs/fields/rollup/condition';
-import { formulaPredicateFieldType, formulaResultToDateCell } from '@/application/database-yjs/formula/filter';
 import { parseRollupTypeOption } from '@/application/database-yjs/fields/rollup/parse';
 import { parseCheckboxValue } from '@/application/database-yjs/fields/text/utils';
+import { formulaPredicateFieldType, formulaResultToDateCell } from '@/application/database-yjs/formula/filter';
 import { isDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
 import { getRelationRowIdsFromCell } from '@/application/database-yjs/relation/cell';
-import { getRowKey } from '@/application/database-yjs/row_meta';
 import { waitForDatabaseRowHydration } from '@/application/database-yjs/row.hydration';
+import { getRowKey } from '@/application/database-yjs/row_meta';
 import {
   LoadViewOptions,
   RowId,
@@ -32,8 +32,9 @@ import {
 } from '@/application/types';
 import { canonicalizeUserUid } from '@/application/user-uid';
 
+import { ComputedDependencyError, ComputedSession, enterComputedCell, evaluateRollupFormula, releaseComputedFormulaEngines } from './computed';
 import { rememberRollupTarget } from './filter';
-import { ComputedDependencyError, ComputedSession, enterComputedCell, evaluateRollupFormula } from './computed';
+
 import type { RollupSourceSync } from './source-sync';
 
 export type RollupFilterCell = {
@@ -491,13 +492,19 @@ export async function evaluateRollupCell(
   context: RollupComputeContext,
   session?: ComputedSession
 ): Promise<RollupCellValue> {
+  const current: ComputedSession = session ?? { path: new Set<string>(), now: Date.now() };
+  const ownsEngines = !current.nativeFormulaEngines;
+
+  current.nativeFormulaEngines ??= new Map();
   try {
-    return await computeRollupInSession(context, session ?? { path: new Set(), now: Date.now() });
+    return await computeRollupInSession(context, current);
   } catch (error) {
     if (error instanceof ComputedDependencyError && !context.requireLoadedSources)
       return { value: '', error: error.message };
     if (context.requireLoadedSources || context.loadSourceDocumentsDirectly) throw error;
     return { value: '', error: error instanceof Error ? error.message : 'Rollup source could not be loaded' };
+  } finally {
+    if (ownsEngines) releaseComputedFormulaEngines(current);
   }
 }
 
@@ -660,7 +667,8 @@ async function computeRollupCellValue(
         computeRollupInSession
       );
 
-      text = result.error ? '' : result.text;
+      if (result.error) throw new Error(result.error);
+      text = result.text;
       parsedData = result.rawNumeric ?? result.rawBoolean ?? result.rawDate?.start ?? text;
       filterData = parsedData;
       date = formulaResultToDateCell(result) ?? undefined;
