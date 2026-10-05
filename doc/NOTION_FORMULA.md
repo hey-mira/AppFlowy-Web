@@ -42,6 +42,10 @@ contracts define exact semantics. In particular:
 - Preserve NaN, Infinity, signed zero, nested nulls, and the evaluation-time output
   type. Unknown/Union types stay conservative in host filtering and calculation
   controls; a single row's value does not redefine a column's static type.
+- Numeric sorting orders `-Infinity < finite values < Infinity < NaN`, reversing
+  that order for descending sorts; ordinary null and errors stay last. NaNs and
+  signed zeros retain stable ties. Numeric comparisons reject NaN, while
+  `IsNotEmpty` includes it; finite decimal comparisons retain host precision.
 - Pending, ordinary null, invalid formulas, and row errors are distinct. Keep
   originating Formula IDs when dependency errors propagate. Filters, sorting,
   and column calculations include the offscreen rows they need.
