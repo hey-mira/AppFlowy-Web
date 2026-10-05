@@ -158,6 +158,7 @@ test('Chinese and emoji survive native help, formatting, fixes and undo', async 
 
   await replaceSource(input, 'if(true,"你好😀","no")');
   await expect(page.getByTestId('formula-preview-value')).toHaveText('你好😀');
+  await input.press('Escape');
   await page.getByTestId('formula-editor-format').click();
   await expect(input).toHaveAttribute('data-value', 'if(true, "你好😀", "no")\n');
   await input.press('ControlOrMeta+z');
@@ -167,6 +168,7 @@ test('Chinese and emoji survive native help, formatting, fixes and undo', async 
   await replaceSource(input, 'if(true, "你好😀", "no"');
   await expect(page.getByTestId('formula-signature-help')).toContainText('if');
   await expect(page.getByTestId('formula-editor-quick-fix').first()).toBeVisible();
+  await input.press('Escape');
   await page.getByTestId('formula-editor-quick-fix').first().click();
   await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
   await expect(page.getByTestId('formula-preview-value')).toHaveText('你好😀');
@@ -473,10 +475,31 @@ test('ambiguous display names require a property choice and preview uses the sel
   await expect(page.getByTestId('formula-editor-error')).toContainText('ambiguous');
   await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
   await replaceSource(input, '');
+  await expect(input).toHaveAttribute('data-value', '');
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await input.press('Escape');
   await page.getByTestId('formula-catalogue-property-subtotal').click();
   await expect(input).toHaveAttribute('data-value', 'prop("subtotal")');
   await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
   await page.getByTestId('formula-preview-row').click();
+  await page.getByRole('menuitem', { name: 'Beta', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('15');
+  await expect(page.getByTestId('formula-preview-row')).toHaveText('Beta');
+});
+
+test('preview row remains selectable after a catalogue insertion', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, '');
+  await expect(input).toHaveAttribute('data-value', '');
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await input.press('Escape');
+  await page.getByTestId('formula-catalogue-property-subtotal').click();
+  await expect(input).toHaveAttribute('data-value', 'prop("subtotal")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
+  await expect(page.getByTestId('formula-autocomplete')).toHaveCount(0);
+  await page.getByTestId('formula-preview-row').click();
+  await expect(page.getByRole('menuitem', { name: 'Beta', exact: true })).toBeVisible();
   await page.getByRole('menuitem', { name: 'Beta', exact: true }).click();
   await expect(page.getByTestId('formula-preview-value')).toHaveText('15');
   await expect(page.getByTestId('formula-preview-row')).toHaveText('Beta');
@@ -516,6 +539,9 @@ test('a saved missing property keeps its ID until the user explicitly selects a 
   await expect(page.getByTestId('saved-expression')).toHaveText('prop("price") + 2');
   await page.getByRole('button', { name: 'Open editor', exact: true }).click();
   await replaceSource(input, '');
+  await expect(input).toHaveAttribute('data-value', '');
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await input.press('Escape');
   await page.getByTestId('formula-catalogue-property-other').click();
   await expect(input).toHaveAttribute('data-value', 'prop("other")');
   await expect(page.getByTestId('formula-preview-value')).toHaveText('100');
@@ -528,6 +554,8 @@ test('catalogue and examples insert at the Slate selection and preserve undo', a
   const input = page.getByTestId('formula-editor-input');
 
   await replaceSource(input, '3 + ');
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await input.press('Escape');
   await page.getByTestId('formula-catalogue-property-other').click();
   await expect(input).toHaveAttribute('data-value', '3 + prop("other")');
   await expect(input).toBeFocused();

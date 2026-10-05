@@ -30,6 +30,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/compon
 import '@/i18n/config';
 import '@/styles/global.css';
 
+// Match index.html: Tailwind utilities are scoped below this application root.
+document.body.id = 'body';
+
 const evidence = {
   workers: 0,
   terminated: 0,

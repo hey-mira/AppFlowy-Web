@@ -187,6 +187,17 @@ export const FormulaSourceInput = memo(
           withFormulaHistoryBatch(editor, () =>
             replaceSourceRange(editor, start, offsets?.end ?? start, text, caretOffset)
           );
+          // Report the programmatic edit before its host dismisses completion;
+          // Slate's queued onChange must not reopen it after the click.
+          const next = editorSource(editor);
+
+          if (next !== sourceRef.current) {
+            sourceRef.current = next;
+            handlersRef.current.onChange(next, 'edit');
+          }
+
+          setChildren(editor.children);
+          handlersRef.current.onCaretChange(selectionOffsets(editor)?.end ?? start);
         },
         selection: () => {
           syncSelectionFromDOM();
@@ -388,6 +399,7 @@ export const FormulaSourceInput = memo(
           renderElement={renderElement}
           renderLeaf={renderLeaf}
           onKeyDown={handleKeyDown}
+          onPaste={syncSelectionFromDOM}
           onDragStart={handleDragStart}
           onDrop={handleDrop}
           // Slate reports the end of a drag only for its own drags.
