@@ -293,7 +293,9 @@ test('permanent materialization rejects missing databases, title properties and 
 
   expect(report.results.map((row) => row.id)).toEqual(['missing-database', 'title-property', 'row-payload']);
   for (const row of report.results) {
-    expect(row.result.error, row.id).toContain('could not be loaded');
+    const expectedError = row.id === 'row-payload' ? 'could not be hydrated for formula evaluation' : 'could not be loaded';
+
+    expect(row.result.error, row.id).toContain(expectedError);
     expect(row.result.rawNumeric, row.id).toBeUndefined();
   }
 });
