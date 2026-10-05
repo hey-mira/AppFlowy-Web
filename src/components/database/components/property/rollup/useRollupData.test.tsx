@@ -11,6 +11,7 @@ import { useRollupData } from './useRollupData';
 const mockUpdateRollupTypeOption = jest.fn();
 const mockLoadView = jest.fn();
 const mockGetViewIdFromDatabaseId = jest.fn();
+let baseDoc: YDoc;
 let baseDatabase: YDatabase;
 let rollupField: YDatabaseField;
 let relatedDoc: YDoc;
@@ -20,6 +21,12 @@ jest.mock('@/application/database-yjs/context', () => ({
   useDatabase: () => baseDatabase,
   useReadOnly: () => false,
   useDatabaseContext: () => ({
+    databaseDoc: baseDoc,
+    databasePageId: baseDoc.guid,
+    activeViewId: baseDoc.guid,
+    workspaceId: 'workspace',
+    readOnly: false,
+    rowMap: null,
     loadView: mockLoadView,
     getViewIdFromDatabaseId: mockGetViewIdFromDatabaseId,
   }),
@@ -52,7 +59,7 @@ function createDeferred<T>() {
 }
 
 function setupDocuments() {
-  const baseDoc = new Y.Doc();
+  baseDoc = new Y.Doc() as YDoc;
   const baseRoot = baseDoc.getMap(YjsEditorKey.data_section);
   const fields = new Y.Map() as YDatabaseFields;
   const relationField = createRelationField('relation', { database_id: 'related-database', name: 'Projects' });
@@ -132,42 +139,8 @@ describe('useRollupData Desktop interactions', () => {
     });
   });
 
-  it('includes computed formula targets and refreshes calculations when their result type changes', async () => {
-    const fields = relatedDoc.getMap(YjsEditorKey.data_section).get(YjsEditorKey.database).get(YjsDatabaseKey.fields);
-    const formula = fields.get('Amount');
-    const options = new Y.Map();
-    const option = new Y.Map();
-
-    options.set(String(FieldType.Formula), option);
-    option.set('expression', '1 + 2');
-    formula.set(YjsDatabaseKey.type_option, options);
-    formula.set(YjsDatabaseKey.type, FieldType.Formula);
-    const { result, rerender } = renderHook(() => useRollupData('rollup'));
-
-    await act(async () => {
-      await result.current.selectRelationField(result.current.relationFields[0]);
-    });
-    expect(mockUpdateRollupTypeOption).toHaveBeenLastCalledWith(
-      expect.objectContaining({ target_field_id: 'Amount', target_field_type: FieldType.Number })
-    );
-    fieldClock += 1;
-    rerender();
-    await waitFor(() => expect(result.current.relatedFields.map(({ id }) => id)).toEqual(['Amount', 'Name']));
-    const previousTarget = result.current.relatedFields[0];
-
-    act(() => {
-      option.set('expression', 'true');
-    });
-    expect(result.current.relatedFields[0].effectiveType).toBe(FieldType.Checkbox);
-    mockUpdateRollupTypeOption.mockClear();
-    act(() => {
-      result.current.selectTargetField(previousTarget);
-    });
-    expect(mockUpdateRollupTypeOption).toHaveBeenCalledWith(
-      expect.objectContaining({ target_field_type: FieldType.Checkbox })
-    );
-  });
-
+  // Native target compilation, type refresh, stale selection and saved dynamic
+  // calculations are covered by native-formula-observers.spec.ts in a real Worker.
   it('keeps a persisted percentage condition after reloading the settings', async () => {
     const fields = relatedDoc.getMap(YjsEditorKey.data_section).get(YjsEditorKey.database).get(YjsDatabaseKey.fields);
 

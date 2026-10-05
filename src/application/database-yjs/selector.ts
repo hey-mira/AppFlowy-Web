@@ -2989,6 +2989,34 @@ function useRollupCellValue({
   }, [rollupContext, fieldType, cellId, fieldClock, relationRowIdsKey, restoreRevision]);
 
   useEffect(() => {
+    if (!rollupContext || fieldType !== FieldType.Rollup || !rollupOption?.relation_field_id) return;
+    const fields = database?.get(YjsDatabaseKey.fields);
+
+    if (!fields) return;
+    const relationSignature = () => {
+      const relation = fields.get(rollupOption.relation_field_id);
+
+      return relation
+        ? `${Number(relation.get(YjsDatabaseKey.type))}:${parseRelationTypeOption(relation)?.database_id ?? ''}`
+        : 'missing';
+    };
+
+    let observedSignature = relationSignature();
+
+    // A configured source can disappear or change independently of the Rollup
+    // field and row cells. Re-read it and dispose the old related observer chain.
+    return subscribeSharedYjsDeep(fields, () => {
+      const nextSignature = relationSignature();
+
+      if (nextSignature === observedSignature) return;
+      observedSignature = nextSignature;
+      invalidateRollupCell(cellId);
+      void readRollupCell(rollupContext);
+      setRelatedObserverRevision((revision) => revision + 1);
+    });
+  }, [rollupContext, fieldType, database, cellId, rollupOption?.relation_field_id]);
+
+  useEffect(() => {
     if (!rollupContext || fieldType !== FieldType.Rollup) return;
     const cells = row?.get(YjsDatabaseKey.cells);
 

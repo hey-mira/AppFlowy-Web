@@ -6,6 +6,10 @@ import { FieldType } from '@/application/database-yjs/database.type';
 import { FormulaFieldSchema, readFormulaSchema } from '@/application/database-yjs/fields/formula/schema';
 import { subscribeFormulaClock } from '@/application/database-yjs/formula/clock';
 import { isDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
+import {
+  getDatabaseDependencyRestoreRevision,
+  useDatabaseDependencyRestoreRevision,
+} from '@/application/database-yjs/restore-dependencies';
 import { evaluateRollupCell } from '@/application/database-yjs/rollup/cache';
 import {
   ComputedDependencyError,
@@ -116,6 +120,7 @@ class NativeFormulaRuntime {
   private lastPeopleTick = 0;
   private readonly history: boolean;
   private readonly historyNow = Date.now();
+  private restoreRevision = getDatabaseDependencyRestoreRevision();
 
   constructor(private readonly databaseDoc: YDoc, private readonly contextKey: string) {
     this.history = contextKey !== 'live';
@@ -128,6 +133,14 @@ class NativeFormulaRuntime {
       this.listeners.delete(notify);
     };
   };
+
+  refreshRestoredSources(revision: number) {
+    if (this.history || revision === this.restoreRevision) return;
+    this.restoreRevision = revision;
+    this.externalDocs.forEach((listener, doc) => doc.off('update', listener));
+    this.externalDocs.clear();
+    this.invalidate();
+  }
 
   retain(owner: object, source: RuntimeOwner) {
     const first = this.owners.size === 0;
@@ -629,12 +642,16 @@ export function useNativeFormulaRuntime({
   enabled = true,
   rows,
   formulaIds = [],
+  context: suppliedContext,
 }: {
   enabled?: boolean;
   rows?: Record<string, YDoc>;
   formulaIds?: readonly string[];
+  /** Settings retain the same related-database session without mounting its rows. */
+  context?: DatabaseContextState;
 } = {}): NativeFormulaSnapshot {
-  const context = useDatabaseContext();
+  const currentContext = useDatabaseContext();
+  const context = suppliedContext ?? currentContext;
   const { databaseDoc, dataSource, rowMap, workspaceId, loadView, createRow, getViewIdFromDatabaseId } = context;
   const key =
     dataSource?.type === 'history'
@@ -643,6 +660,7 @@ export function useNativeFormulaRuntime({
       ? 'history'
       : 'live';
   const runtime = useMemo(() => getRuntime(databaseDoc, key), [databaseDoc, key]);
+  const restoreRevision = useDatabaseDependencyRestoreRevision(enabled && key === 'live');
   const owner = useMemo(() => ({}), []);
   const targetKey = formulaIds.join('\0');
 
@@ -664,6 +682,10 @@ export function useNativeFormulaRuntime({
     createRow,
     getViewIdFromDatabaseId,
   ]);
+
+  useEffect(() => {
+    if (enabled && key === 'live') runtime.refreshRestoredSources(restoreRevision);
+  }, [enabled, key, runtime, restoreRevision]);
 
   return useSyncExternalStore(
     enabled ? runtime.subscribe : noSubscription,

@@ -131,13 +131,15 @@ export async function resolveNativeRowInputs(
       rollups.map(async (entry) => {
         const value = await computeRollup(
           {
+            ...source.loaders,
+            // Loader objects can originate from the caller's compute context;
+            // the nested Input must always supply its own database/cell identity.
             baseDoc: source.baseDoc,
             database: source.database,
             row: source.row,
             rowId: source.rowId,
             rollupField: entry.field,
             fieldId: entry.id,
-            ...source.loaders,
             requireLoadedSources: true,
             loadSourceDocumentsDirectly: true,
           },

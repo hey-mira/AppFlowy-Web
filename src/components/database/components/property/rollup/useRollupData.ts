@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { isNumericCalculation } from '@/application/database-yjs/calculation';
 import { useDatabase, useDatabaseContext, useReadOnly } from '@/application/database-yjs/context';
 import { CalculationType, FieldType, RollupDisplayMode } from '@/application/database-yjs/database.type';
 import { useUpdateRollupTypeOption } from '@/application/database-yjs/dispatch';
 import { parseRelationTypeOption } from '@/application/database-yjs/fields/relation/parse';
 import { usesRollupCondition } from '@/application/database-yjs/fields/rollup/condition';
-import { formulaPredicateFieldType } from '@/application/database-yjs/formula/filter';
 import { parseRollupTypeOption, parseRollupVisualizationOption } from '@/application/database-yjs/fields/rollup/parse';
 import { RollupShowAsType } from '@/application/database-yjs/fields/rollup/rollup.type';
 import { parseSelectOptionTypeOptions } from '@/application/database-yjs/fields/select-option/parse';
+import { formulaPredicateFieldType } from '@/application/database-yjs/formula/filter';
+import { useNativeFormulaRuntime } from '@/application/database-yjs/formula/native-runtime';
+import { nativeFormulaPropertyInSession } from '@/application/database-yjs/formula/native-session';
+import { ComputedSession, releaseComputedFormulaEngines } from '@/application/database-yjs/rollup/computed';
 import { rememberRollupTarget, migrateRollupFilters } from '@/application/database-yjs/rollup/filter';
 import { useFieldSelector } from '@/application/database-yjs/selector';
 import { subscribeSharedYjsDeep } from '@/application/database-yjs/shared-yjs-observer';
@@ -32,6 +36,7 @@ export type TargetFieldOption = {
 
 type RelatedFieldsState = {
   databaseId: string;
+  doc?: YDoc;
   fields: TargetFieldOption[];
   loading: boolean;
 };
@@ -66,7 +71,8 @@ export function useRollupData(fieldId: string) {
   const database = useDatabase();
   const readOnly = useReadOnly();
   const { field, clock } = useFieldSelector(fieldId);
-  const { loadView, getViewIdFromDatabaseId } = useDatabaseContext();
+  const context = useDatabaseContext();
+  const { loadView, getViewIdFromDatabaseId } = context;
   const updateRollupTypeOption = useUpdateRollupTypeOption(fieldId);
 
   const rollupOption = useMemo(() => {
@@ -189,7 +195,7 @@ export function useRollupData(fieldId: string) {
 
           setRelatedFieldsState((current) =>
             current.databaseId === relatedDatabaseId
-              ? { databaseId: relatedDatabaseId, fields: readTargetFields(doc), loading: !fields }
+              ? { databaseId: relatedDatabaseId, doc, fields: readTargetFields(doc), loading: !fields }
               : current
           );
         };
@@ -215,17 +221,53 @@ export function useRollupData(fieldId: string) {
 
   // Effects run after render. Hide the previous relation's schema immediately
   // when the option changes so stale fields can never be selected or persisted.
-  const relatedFields = relatedFieldsState.databaseId === relatedDatabaseId ? relatedFieldsState.fields : [];
+  const relatedDoc = relatedFieldsState.databaseId === relatedDatabaseId ? relatedFieldsState.doc : undefined;
+  const relatedContext = useMemo(
+    () =>
+      relatedDoc
+        ? {
+            ...context,
+            databaseDoc: relatedDoc,
+            databasePageId: relatedDoc.guid,
+            activeViewId: relatedDoc.guid,
+            rowMap: null,
+          }
+        : undefined,
+    [context, relatedDoc]
+  );
+  const native = useNativeFormulaRuntime({
+    enabled: Boolean(relatedDoc && relatedFieldsState.fields.some((target) => target.type === FieldType.Formula)),
+    context: relatedContext,
+  });
+  const relatedFields = useMemo(() => {
+    // Native metadata arrives independently of Yjs schema events. No row is
+    // needed to resolve static type, and Union/Unknown keep the conservative UI.
+    void native.properties;
+    return relatedFieldsState.databaseId === relatedDatabaseId
+      ? relatedFieldsState.fields.map((target) => ({
+          ...target,
+          effectiveType: target.type === FieldType.Formula ? formulaPredicateFieldType(target.field) : target.type,
+        }))
+      : [];
+  }, [relatedFieldsState, relatedDatabaseId, native.properties]);
   const loadingRelated =
     Boolean(relatedDatabaseId) && (relatedFieldsState.databaseId !== relatedDatabaseId || relatedFieldsState.loading);
 
   const targetField = relatedFields.find((target) => target.id === rollupOption.target_field_id);
+  const targetState = targetField && native.properties.get(targetField.id);
+  const targetOutput =
+    targetState && 'Formula' in targetState && targetState.Formula.status !== 'NotReady'
+      ? targetState.Formula.status.Ready.output_type
+      : undefined;
+  const pendingFormulaType = targetField?.type === FieldType.Formula && targetOutput === undefined;
+  const uncertainFormulaType =
+    targetOutput === 'Unknown' || (typeof targetOutput === 'object' && 'Union' in targetOutput);
 
   useEffect(() => {
-    if (!field || !targetField) return;
+    if (!field || !targetField || pendingFormulaType) return;
     rememberRollupTarget(field, targetField.field);
     if (!readOnly) database.doc?.transact(() => migrateRollupFilters(database, fieldId, targetField.effectiveType));
-  }, [database, field, fieldId, targetField, readOnly]);
+  }, [database, field, fieldId, targetField, readOnly, pendingFormulaType]);
 
   const availableCalculations = useMemo(
     () => getAvailableRollupCalculations(targetField?.effectiveType),
@@ -234,11 +276,22 @@ export function useRollupData(fieldId: string) {
 
   // Keep imported/remote options valid even when another client changes the target.
   useEffect(() => {
-    if (readOnly || targetField?.type === undefined) return;
+    if (readOnly || targetField?.type === undefined || pendingFormulaType) return;
     if (availableCalculations.includes(rollupOption.calculation_type as CalculationType)) return;
+    // Existing numeric operations validate the actual native values. A static
+    // Unknown/Union cannot prove them incompatible or justify rewriting Count.
+    if (uncertainFormulaType && isNumericCalculation(rollupOption.calculation_type as CalculationType)) return;
 
     updateRollupTypeOption({ calculation_type: CalculationType.Count, condition_value: '' });
-  }, [availableCalculations, rollupOption.calculation_type, targetField?.type, updateRollupTypeOption, readOnly]);
+  }, [
+    availableCalculations,
+    rollupOption.calculation_type,
+    targetField?.type,
+    updateRollupTypeOption,
+    readOnly,
+    pendingFormulaType,
+    uncertainFormulaType,
+  ]);
 
   useEffect(() => {
     if (
@@ -270,6 +323,25 @@ export function useRollupData(fieldId: string) {
       try {
         const doc = await loadRelatedDoc(relation.databaseId);
         const firstTarget = readTargetFields(doc)[0];
+
+        if (doc && firstTarget?.type === FieldType.Formula) {
+          const session: ComputedSession = { path: new Set(), now: Date.now(), nativeFormulaEngines: new Map() };
+
+          try {
+            await nativeFormulaPropertyInSession(
+              {
+                database: doc.getMap(YjsEditorKey.data_section).get(YjsEditorKey.database),
+                baseDoc: doc,
+                fieldId: firstTarget.id,
+              },
+              session
+            );
+            firstTarget.effectiveType = formulaPredicateFieldType(firstTarget.field);
+          } finally {
+            releaseComputedFormulaEngines(session);
+          }
+        }
+
         const latestOption = parseRollupTypeOption(field);
 
         if (
