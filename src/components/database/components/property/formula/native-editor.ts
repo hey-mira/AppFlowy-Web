@@ -13,10 +13,18 @@ import type {
   PropertyReference,
   QuickFix,
   UpdateExpressionResult,
+  ValueType,
 } from '@notion-formula/sdk';
 
 export type NativePropertyReference = PropertyReference;
 export type NativeDraftState = FormulaDraftState;
+
+/** Display the complete inferred type, including unions and unknown elements. */
+export function nativeFormulaTypeLabel(type: ValueType): string {
+  if (typeof type === 'string') return type === 'String' ? 'text' : type.toLowerCase();
+  if ('List' in type) return `list<${nativeFormulaTypeLabel(type.List)}>`;
+  return type.Union.map(nativeFormulaTypeLabel).join(' | ');
+}
 
 const sessionLeases = new WeakMap<object, { active: number; revision: number }>();
 

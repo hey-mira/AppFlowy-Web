@@ -21,8 +21,6 @@ import {
 } from '@/application/database-yjs/context';
 import { decodeCellToText } from '@/application/database-yjs/decode';
 import { FormulaFieldSchema, readFormulaSchemaForVersion } from '@/application/database-yjs/fields/formula/schema';
-import { typeToString } from '@/application/database-yjs/fields/formula/values';
-import { appFlowyFormulaType } from '@/application/database-yjs/formula/native-values';
 import { useDatabaseFieldsVersion } from '@/application/database-yjs/hooks/useDatabaseFieldsVersion';
 import { getInlineViewRowOrders, materializeVisibleRowOrders } from '@/application/database-yjs/row-order-visibility';
 import { Row, usePrimaryFieldId } from '@/application/database-yjs/selector';
@@ -43,6 +41,7 @@ import {
   NativeDraftAnalysis,
   NativeFormulaEditorSession,
   nativeEditorProperties,
+  nativeFormulaTypeLabel,
   retainNativeSession,
 } from './native-editor';
 import { useNativeFormulaPreview } from './use-native-preview';
@@ -499,7 +498,7 @@ export const FormulaEditor = forwardRef<FormulaEditorHandle, FormulaEditorProps>
           data-testid='formula-editor-type'
         >
           {t('grid.formula.type', { defaultValue: 'Type' })}:{' '}
-          {analysis ? typeToString(appFlowyFormulaType(analysis.state.output_type)) : '…'}
+          {analysis ? nativeFormulaTypeLabel(analysis.state.output_type) : '…'}
         </span>
       </div>
       {previewRows.length > 0 && (

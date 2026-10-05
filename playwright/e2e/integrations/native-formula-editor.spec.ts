@@ -114,6 +114,28 @@ test.afterEach(async ({ page }, testInfo) => {
 // runs; editing blocks the committed Engine; formulas disappear from property
 // completion; saving stores names; cancellation writes Yjs; one-row runtime
 // errors prohibit a statically valid save; a Worker is created on each edit.
+test('displays native Union and Unknown types without losing their structure', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+  const cases = [
+    ['42', 'number'],
+    ['"text"', 'text'],
+    ['true', 'boolean'],
+    ['today()', 'date'],
+    ['[1, 2]', 'list<number>'],
+    ['[1, "x"]', 'list<number | text>'],
+    ['[[1, "x"]]', 'list<list<number | text>>'],
+    ['if(true, 1, "x")', 'number | text'],
+    ['[]', 'list<unknown>'],
+    ['empty()', 'unknown'],
+  ];
+
+  for (const [expression, expected] of cases) {
+    await replaceSource(input, expression);
+    await expect(page.getByTestId('formula-editor-type'), expression).toHaveText(`Type: ${expected}`);
+    await expect(page.getByTestId('formula-editor-error'), expression).toHaveCount(0);
+  }
+});
+
 test('Draft completion and candidate preview remain isolated from saved formulas', async ({ page }) => {
   const input = page.getByTestId('formula-editor-input');
   const saved = page.getByTestId('saved-expression');
@@ -794,7 +816,9 @@ test('member candidate history uses saved names without owning the live roster c
   await page.getByRole('button', { name: 'Switch to history', exact: true }).click();
   await expect(page.getByTestId('formula-preview-value')).toHaveText('Saved Ada');
   await expect.poll(async () => (await evidence(page)).clockOwners).toBe(0);
-  const requests = (await evidence(page)).requests.length;
+  // Restoring history chips may refresh Draft help after preview settles.
+  // The history contract prohibits live reevaluation, not editor queries.
+  const evaluations = (await evidence(page)).requests.filter((request) => request.method === 'engine.evaluate').length;
 
   await page.evaluate(async () => {
     await (window as unknown as { editorFixture: MemberPreviewFixture }).editorFixture.setMemberName('Grace');
@@ -802,7 +826,9 @@ test('member candidate history uses saved names without owning the live roster c
   await page.clock.setFixedTime(new Date('2026-10-05T00:01:00Z'));
   await page.clock.fastForward(60_000);
   await expect(page.getByTestId('formula-preview-value')).toHaveText('Saved Ada');
-  expect((await evidence(page)).requests).toHaveLength(requests);
+  expect((await evidence(page)).requests.filter((request) => request.method === 'engine.evaluate')).toHaveLength(
+    evaluations
+  );
   await page.getByTestId('formula-editor-cancel').click();
   await expect
     .poll(async () => {
