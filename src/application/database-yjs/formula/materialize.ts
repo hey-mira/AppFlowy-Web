@@ -1,5 +1,6 @@
 import { RelatedRowLoaders } from '@/application/database-yjs/formula/read-context';
 import { readRelationMembership } from '@/application/database-yjs/relation/cache';
+import { retainRollupSource, RollupSourceSync } from '@/application/database-yjs/rollup/source-sync';
 import { YDoc } from '@/application/types';
 
 /** A permanent conversion must not mistake unhydrated row orders for live membership. */
@@ -31,25 +32,55 @@ export function waitForRelationMembership(doc: YDoc): Promise<ReadonlySet<string
 }
 
 /** Watch related rows and schemas before their values are read, for one conversion pass. */
-export function observeFormulaRelatedDocuments(loaders: RelatedRowLoaders, changed: () => void) {
+export function observeFormulaRelatedDocuments(
+  loaders: RelatedRowLoaders & RollupSourceSync,
+  changed: () => void,
+  signal?: AbortSignal
+) {
   const { loadView, createRow } = loaders;
   const documents = new Set<YDoc>();
+  const metadataDocuments = new WeakSet<YDoc>();
+  const releases = new Map<YDoc, () => void>();
   let active = true;
   const observe = <T extends YDoc | null>(doc: T): T => {
-    if (active && doc && !documents.has(doc)) {
+    if (active && !signal?.aborted && doc && !documents.has(doc)) {
       documents.add(doc);
       doc.on('update', changed);
     }
 
+    if (active && !signal?.aborted && doc && metadataDocuments.has(doc) && !releases.has(doc)) {
+      const release = retainRollupSource(loaders, doc);
+
+      if (active) releases.set(doc, release);
+      else release();
+    }
+
     return doc;
+  };
+
+  const requireActivePass = () => {
+    if (signal?.aborted) throw new DOMException('Formula conversion cancelled', 'AbortError');
   };
 
   return {
     observe,
     loaders: {
       ...loaders,
-      loadView: loadView ? async (...args) => observe(await loadView(...args)) : undefined,
-      createRow: createRow ? async (...args) => observe(await createRow(...args)) : undefined,
+      loadView: loadView ? async (...args) => {
+        requireActivePass();
+        const doc = await loadView(...args);
+
+        requireActivePass();
+        if (doc) metadataDocuments.add(doc);
+        return observe(doc);
+      } : undefined,
+      createRow: createRow ? async (...args) => {
+        requireActivePass();
+        const doc = await createRow(...args);
+
+        requireActivePass();
+        return observe(doc);
+      } : undefined,
     } satisfies RelatedRowLoaders,
     dispose: () => {
       // A sibling read may still settle after another read fails. It must not
@@ -57,6 +88,8 @@ export function observeFormulaRelatedDocuments(loaders: RelatedRowLoaders, chang
       active = false;
       documents.forEach((doc) => doc.off('update', changed));
       documents.clear();
+      releases.forEach((release) => release());
+      releases.clear();
     },
   };
 }
