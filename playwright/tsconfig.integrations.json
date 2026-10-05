@@ -12,6 +12,8 @@
     "support/native-formula.fixture.tsx",
     "support/native-formula-consumers.fixture.tsx",
     "support/native-formula-history.fixture.tsx",
+    "support/native-formula-observers.fixture.tsx",
+    "support/native-formula-rollup.fixture.ts",
     "support/native-formula-conditions.fixture.tsx",
     "support/native-formula-deletion.fixture.tsx",
     "support/native-formula-values.fixture.ts",

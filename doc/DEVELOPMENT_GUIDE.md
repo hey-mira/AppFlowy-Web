@@ -9,7 +9,7 @@ AppFlowy Web requires AppFlowy Cloud as its backend. You can set up this pair in
 
 Before you begin, ensure you have:
 
-- **Node.js** ≥18.0.0
+- **Node.js** ≥20.0.0
 - **pnpm** ≥10.9.0  
 - **Docker & Docker Compose** (required for both modes)
 
