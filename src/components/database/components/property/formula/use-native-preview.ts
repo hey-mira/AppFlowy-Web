@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { createFormulaEngineClient } from '@notion-formula/sdk';
-
 import { useDatabaseContext } from '@/application/database-yjs/context';
 import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/schema';
 import { useFormulaClock } from '@/application/database-yjs/formula/clock';
@@ -44,8 +42,11 @@ class NativeFormulaPreviewSession {
         ])
       );
 
-      if (!this.engine) this.engine = await createFormulaEngineClient({ properties });
-      else {
+      if (!this.engine) {
+        const { createFormulaEngineClient } = await import('@notion-formula/sdk');
+
+        this.engine = await createFormulaEngineClient({ properties });
+      } else {
         for (const id of this.definitions.keys()) if (!next.has(id)) await this.engine.remove(id);
         for (const property of properties) {
           const id = 'Input' in property ? property.Input.id : property.Formula.id;

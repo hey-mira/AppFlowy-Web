@@ -23,6 +23,15 @@ type Fixture = {
   setHold: (method: string) => void;
   selectTarget: (id: string) => void;
   release: () => void;
+  documentState: () => {
+    ids: string[];
+    orders: string[];
+    subtotal: string;
+    total: string;
+    rollupFormula: string;
+    priceCell: unknown;
+    otherName: unknown;
+  };
 };
 const evidence = (page: Page) =>
   page.evaluate(() => (window as unknown as { deletionEvidence: Evidence }).deletionEvidence);
@@ -42,7 +51,19 @@ test.afterEach(async ({ page }, testInfo) => {
 
   await writeFile(
     json,
-    JSON.stringify({ scenario: testInfo.title, status: testInfo.status, evidence: await evidence(page) }, null, 2)
+    JSON.stringify(
+      {
+        scenario: testInfo.title,
+        status: testInfo.status,
+        profile: process.env.FORMULA_FIXTURE_PRODUCTION === '1' ? 'production' : 'development',
+        documents: await page.evaluate(() =>
+          (window as unknown as { deletionFixture: Fixture }).deletionFixture.documentState()
+        ),
+        evidence: await evidence(page),
+      },
+      null,
+      2
+    )
   );
   await page.screenshot({ path: screenshot });
   await testInfo.attach('native-formula-deletion-evidence.json', { path: json, contentType: 'application/json' });
@@ -102,6 +123,94 @@ test('relation deletion warning follows host rollups into native formula depende
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.getByTestId('field-present')).toHaveText('true');
   await expect(page.getByTestId('committed-total')).toHaveText('21');
+});
+
+for (const target of ['price', 'subtotal']) {
+  test(`deleting ${target} through database history restores field order, cells and native results on undo and redo`, async ({
+    page,
+    formulaURL,
+  }) => {
+    await page.goto(new URL(`/native-formula-deletion-fixture?history=1&target=${target}`, formulaURL).href);
+    await expect(page.getByTestId('committed-base')).toHaveText('20');
+    await expect(page.getByTestId('committed-total')).toHaveText('21');
+    await expect(page.getByTestId('committed-unrelated')).toHaveText('42');
+    await expect(page.getByTestId('history-undo')).toBeDisabled();
+    const orders = await page.getByTestId('field-orders').textContent();
+    const afterDeletion = orders!
+      .split(',')
+      .filter((id) => id !== target)
+      .join(',');
+
+    await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect(page.getByTestId('field-present')).toHaveText('false');
+    await expect(page.getByTestId('field-orders')).toHaveText(afterDeletion);
+    await expect(page.getByTestId('committed-total')).toHaveAttribute('data-state', 'not-ready');
+    await expect(page.getByTestId('committed-total')).toHaveAttribute('data-error', /not ready/);
+    await expect(page.getByTestId('committed-total')).toHaveText('');
+    await expect(page.getByTestId('committed-unrelated')).toHaveText('42');
+    await expect(page.getByTestId('saved-total')).toHaveText('prop("subtotal") + 1');
+    await expect(page.getByTestId('row-price')).toHaveText('10');
+    if (target === 'price') {
+      await expect(page.getByTestId('committed-base')).toHaveAttribute('data-state', 'not-ready');
+      await expect(page.getByTestId('saved-subtotal')).toHaveText('prop("price") * 2');
+    }
+
+    await page.getByRole('button', { name: 'Undo deletion', exact: true }).click();
+    await expect(page.getByTestId('field-present')).toHaveText('true');
+    await expect(page.getByTestId('field-orders')).toHaveText(orders!);
+    await expect(page.getByTestId('committed-base')).toHaveText('20');
+    await expect(page.getByTestId('committed-base')).toHaveAttribute('data-number', '20');
+    await expect(page.getByTestId('committed-total')).toHaveText('21');
+    await expect(page.getByTestId('committed-total')).toHaveAttribute('data-state', 'value');
+    await expect(page.getByTestId('committed-total')).toHaveAttribute('data-error', '');
+    await expect(page.getByTestId('saved-subtotal')).toHaveText('prop("price") * 2');
+    await expect(page.getByTestId('saved-total')).toHaveText('prop("subtotal") + 1');
+    await expect(page.getByTestId('row-price')).toHaveText('10');
+    await page.getByRole('button', { name: 'Redo deletion', exact: true }).click();
+    await expect(page.getByTestId('field-present')).toHaveText('false');
+    await expect(page.getByTestId('field-orders')).toHaveText(afterDeletion);
+    await expect(page.getByTestId('committed-total')).toHaveAttribute('data-state', 'not-ready');
+    await expect(page.getByTestId('committed-total')).toHaveText('');
+    await expect(page.getByTestId('committed-unrelated')).toHaveText('42');
+    await expect(page.getByTestId('saved-total')).toHaveText('prop("subtotal") + 1');
+    await expect(page.getByTestId('row-price')).toHaveText('10');
+  });
+}
+
+test('serialized deletion reloads into fresh documents without rebinding the missing ID to a reused name', async ({
+  page,
+  formulaURL,
+}) => {
+  await page.goto(new URL('/native-formula-deletion-fixture?history=1', formulaURL).href);
+  await expect(page.getByTestId('committed-base')).toHaveText('20');
+  await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page.getByTestId('field-present')).toHaveText('false');
+  await page.evaluate(() => {
+    const fixture = (window as unknown as { deletionFixture: Fixture }).deletionFixture;
+
+    fixture.fields.get('other')!.set('name', 'Price');
+  });
+  await expect(page.getByTestId('committed-base')).toHaveAttribute('data-state', 'not-ready');
+  await page.getByRole('button', { name: 'Serialize documents', exact: true }).click();
+  const saved = await page.evaluate(() =>
+    (window as unknown as { deletionFixture: Fixture }).deletionFixture.documentState()
+  );
+
+  await page.goto(new URL('/native-formula-deletion-fixture?history=1&restore=1', formulaURL).href);
+  await expect(page.getByTestId('field-present')).toHaveText('false');
+  await expect(page.getByTestId('committed-base')).toHaveAttribute('data-state', 'not-ready');
+  await expect(page.getByTestId('committed-total')).toHaveAttribute('data-state', 'not-ready');
+  await expect(page.getByTestId('committed-unrelated')).toHaveText('42');
+  await expect(page.getByTestId('saved-subtotal')).toHaveText('prop("price") * 2');
+  await expect(page.getByTestId('saved-total')).toHaveText('prop("subtotal") + 1');
+  await expect(page.getByTestId('row-price')).toHaveText('10');
+  await expect(page.getByTestId('history-undo')).toBeDisabled();
+  expect(
+    await page.evaluate(() => (window as unknown as { deletionFixture: Fixture }).deletionFixture.documentState())
+  ).toEqual(saved);
+  expect(saved.otherName).toBe('Price');
 });
 
 test('native deletion warning follows stable IDs through rename and confirms actual deletion', async ({ page }) => {
@@ -187,10 +296,10 @@ test('new schema and target supersede held deletion replies and cancellation clo
     .toBe(true);
 });
 
-test('native dependency initialization failure is visible and Cancel remains safe', async ({ page, formulaURL }) => {
+test('private native dependency Worker failure is visible and Cancel remains safe', async ({ page, formulaURL }) => {
   await page.goto(new URL('/native-formula-deletion-fixture?fail=1', formulaURL).href);
   await expect(page.getByTestId('committed-total')).toHaveText('21');
-  await expect(page.getByTestId('formula-deletion-error')).toContainText('Native dependency Worker could not start');
+  await expect(page.getByTestId('formula-deletion-error')).toContainText('Native dependency Worker failed');
   await expect(page.getByTestId('formula-deletion-pending')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -198,8 +307,9 @@ test('native dependency initialization failure is visible and Cancel remains saf
   await expect(page.getByTestId('field-present')).toHaveText('true');
   const current = await evidence(page);
 
-  expect(current.workers).toBe(1);
-  expect(current.attemptedWorkers).toBeGreaterThanOrEqual(2);
+  expect(current.workers).toBeGreaterThanOrEqual(2);
+  expect(current.terminated).toBe(current.workers - 1);
+  expect(current.attemptedWorkers).toBe(current.workers);
   expect(current.pageErrors).toEqual([]);
 });
 
@@ -237,4 +347,29 @@ test('Cancel while checking detaches the old warning before a new confirmation o
       return current.terminated === current.workers - 1;
     })
     .toBe(true);
+});
+
+test('deleting a configured relation leaves its Rollup and dependent formulas in an explicit failure state', async ({
+  page,
+  formulaURL,
+}) => {
+  await page.goto(new URL('/native-formula-deletion-fixture?rollup=1&target=links', formulaURL).href);
+  await expect(page.getByTestId('committed-rollup-input')).toHaveText('6');
+  await expect(page.getByTestId('committed-rollup')).toHaveText('12');
+  await expect(page.getByTestId('committed-rollup-summary')).toHaveText('12');
+  await expect(page.getByTestId('formula-deletion-warning').locator('li')).toHaveText([
+    'Rolled formula',
+    'Rolled summary',
+  ]);
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('field-present')).toHaveText('false');
+  await expect(page.getByTestId('committed-rollup-input')).toHaveAttribute('data-error', /links/);
+  for (const id of ['committed-rollup', 'committed-rollup-summary']) {
+    await expect(page.getByTestId(id)).toHaveAttribute('data-state', 'error');
+    await expect(page.getByTestId(id)).toHaveAttribute('data-error', /links/);
+    await expect(page.getByTestId(id)).toHaveText('');
+  }
+
+  await expect(page.getByTestId('committed-total')).toHaveText('21');
 });

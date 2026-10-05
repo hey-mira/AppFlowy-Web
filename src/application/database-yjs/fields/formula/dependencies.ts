@@ -1,5 +1,3 @@
-import { createFormulaEngineClient } from '@notion-formula/sdk';
-
 import { FieldType } from '@/application/database-yjs/database.type';
 import { parseRollupTypeOption } from '@/application/database-yjs/fields/rollup/parse';
 import { nativePropertyDefinition } from '@/application/database-yjs/formula/native-values';
@@ -24,6 +22,7 @@ export async function collectDependentFormulaFields(
     if (relationId) rollups.set(relationId, [...(rollups.get(relationId) ?? []), entry.id]);
   }
 
+  const { createFormulaEngineClient } = await import('@notion-formula/sdk');
   const engine = await createFormulaEngineClient({ properties });
   const close = () => {
     void engine.close().catch(() => undefined);

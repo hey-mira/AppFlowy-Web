@@ -1,5 +1,3 @@
-import { createFormulaEngineClient } from '@notion-formula/sdk';
-
 import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/schema';
 import { nativePropertyDefinition } from '@/application/database-yjs/formula/native-values';
 
@@ -79,6 +77,8 @@ export class NativeFormulaEditorSession {
       Array.from(next).some(([id, definition]) => this.definitions.get(id) !== definition);
 
     if (!this.engine) {
+      const { createFormulaEngineClient } = await import('@notion-formula/sdk');
+
       this.engine = await createFormulaEngineClient({ properties });
     } else if (changed) {
       await this.draft?.close();
