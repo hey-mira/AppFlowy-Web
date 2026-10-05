@@ -5,13 +5,19 @@ import { stringifyDesktopNumberValue } from '@/application/database-yjs/fields/n
 import { DateFormat, TimeFormat } from '@/application/types';
 import { getDateFormat, getTimeFormat, renderDate } from '@/utils/time';
 
-import { formatNumberPlain } from './coerce';
 import { FormulaDate, FormulaValue } from './values';
 
 export interface FormulaFormatOptions {
   numberFormat?: NumberFormat;
   dateFormat?: DateFormat;
   timeFormat?: TimeFormat;
+}
+
+/** Plain host display text; native result adaptation handles non-finite values. */
+export function formatNumberPlain(value: number): string {
+  if (!Number.isFinite(value)) return '';
+  if (Number.isInteger(value)) return String(value);
+  return String(Number(value.toPrecision(15)));
 }
 
 export function formatFormulaNumber(value: number, numberFormat: NumberFormat = NumberFormat.Num): string {

@@ -52,6 +52,10 @@ jobs:
         run: pnpm exec tsc --project playwright/tsconfig.integrations.json
       - name: Test connections and connected features
         run: pnpm test:e2e:integrations
+      - name: Test production Formula Worker and WASM assets
+        run: pnpm exec playwright test native-formula --config=playwright.integrations.config.ts --project=chromium --output=test-results/native-formula-production
+        env:
+          FORMULA_FIXTURE_PRODUCTION: '1'
       - name: Upload browser test results
         if: always()
         uses: actions/upload-artifact@v4

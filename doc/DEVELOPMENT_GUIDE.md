@@ -37,6 +37,9 @@ Both Dockerfiles require the prepared SDK in the build context; run preparation
 before `docker build`. CI prepares it before dependency installation and Docker
 builds, and keys the package cache by the pinned source and preparation scripts.
 
+See [Rust formula integration](NOTION_FORMULA.md) for storage compatibility,
+editor behavior, and reproducible browser checks.
+
 ## 🛠️ Development Mode Setup
 
 **Best for:** Local development, testing, and debugging individual services.

@@ -9,7 +9,15 @@
     "support/integrations-server.ts",
     "support/integrations.fixture.tsx",
     "support/native-formula-server.ts",
-    "support/native-formula.fixture.tsx"
+    "support/native-formula.fixture.tsx",
+    "support/native-formula-consumers.fixture.tsx",
+    "support/native-formula-history.fixture.tsx",
+    "support/native-formula-conditions.fixture.tsx",
+    "support/native-formula-deletion.fixture.tsx",
+    "support/native-formula-values.fixture.ts",
+    "support/native-formula-compatibility.fixture.ts",
+    "support/native-formula-editor-server.ts",
+    "support/native-formula-editor.fixture.tsx"
   ],
   "references": []
 }

@@ -16,8 +16,6 @@ export interface FormulaTypeOption {
   __rollup_show_as_show_number__?: boolean;
 }
 
-export const FORMULA_MAX_DEPTH = 15;
-
 /** Result of evaluating a formula for one row. */
 export interface FormulaCellResult {
   /** The evaluated value; `EMPTY` when the formula is blank or failed. */

@@ -1,8 +1,6 @@
 import { FieldType } from '@/application/database-yjs/database.type';
 import { YDatabaseField, YDatabaseFields, YjsDatabaseKey } from '@/application/types';
 
-import { findFormulaPropCalls } from './prop-calls';
-
 /** The part of a field a formula needs: identity, type and the Yjs handle for cell decoding. */
 export interface FormulaFieldSchema {
   id: string;
@@ -15,19 +13,12 @@ const schemaCache = new WeakMap<
   YDatabaseFields,
   { version: number | undefined; schema: FormulaFieldSchema[]; signature: string }
 >();
-// Keep the source even for an empty schema, so a retained snapshot can discover
-// fields added while its view has no mounted subscribers.
-const schemaSources = new WeakMap<FormulaFieldSchema[], YDatabaseFields>();
 const signatureCache = new WeakMap<FormulaFieldSchema[], string>();
-const indexCache = new WeakMap<
-  FormulaFieldSchema[],
-  { byId: Map<string, FormulaFieldSchema>; byName: Map<string, FormulaFieldSchema> }
->();
 
 /**
  * Observer versions can lag inside a transaction or while a view is closed.
  * Validate the live fields at the read boundary, then share the signature and
- * lookup maps for the resulting snapshot throughout synchronous evaluation.
+ * schema metadata for the resulting snapshot throughout a native batch.
  */
 function readCurrentFormulaSchema(fields: YDatabaseFields, version?: number): FormulaFieldSchema[] {
   const cached = schemaCache.get(fields);
@@ -54,7 +45,6 @@ function readCurrentFormulaSchema(fields: YDatabaseFields, version?: number): Fo
     return cached.schema;
   }
 
-  schemaSources.set(schema, fields);
   // Capture type options now: the Yjs handles can mutate before a caller first
   // requests this snapshot's signature.
   signatureCache.set(schema, signature);
@@ -69,18 +59,6 @@ export function readFormulaSchema(fields?: YDatabaseFields): FormulaFieldSchema[
 /** Share one validated schema snapshot among callers reading the same version. */
 export function readFormulaSchemaForVersion(fields: YDatabaseFields | undefined, version: number): FormulaFieldSchema[] {
   return fields ? readCurrentFormulaSchema(fields, version) : [];
-}
-
-/** Only retained snapshots from the schema readers carry a refreshable source. */
-export function hasFormulaSchemaSource(schema: FormulaFieldSchema[]): boolean {
-  return schemaSources.has(schema);
-}
-
-/** Refresh retained schemas before using cached plans or results; leave untracked arrays unchanged. */
-export function refreshFormulaSchema(schema: FormulaFieldSchema[]): FormulaFieldSchema[] {
-  const fields = schemaSources.get(schema);
-
-  return fields ? readCurrentFormulaSchema(fields) : schema;
 }
 
 /** Changes whenever a field is added, removed, renamed, retyped or reconfigured. */
@@ -101,77 +79,4 @@ export function formulaSchemaSignature(schema: FormulaFieldSchema[]): string {
 /** Native Yrs type options can contain BigInts, including integers beyond Number's exact range. */
 export function stringifyFormulaConfig(value: unknown): string {
   return JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? item.toString() : item));
-}
-
-function schemaIndex(schema: FormulaFieldSchema[]) {
-  let index = indexCache.get(schema);
-
-  if (!index) {
-    const byId = new Map<string, FormulaFieldSchema>();
-    const byName = new Map<string, FormulaFieldSchema>();
-
-    schema.forEach((entry) => {
-      byId.set(entry.id, entry);
-      // The first field with a name wins, matching a front-to-back search.
-      if (!byName.has(entry.name)) byName.set(entry.name, entry);
-    });
-    index = { byId, byName };
-    indexCache.set(schema, index);
-  }
-
-  return index;
-}
-
-/**
- * Resolves a `prop("ref")` reference. Storage uses ids; the editor and hand
- * typed formulas use names, so both are accepted (ids win over names).
- */
-export function resolveFormulaField(schema: FormulaFieldSchema[], ref: string): FormulaFieldSchema | undefined {
-  const { byId, byName } = schemaIndex(schema);
-
-  return byId.get(ref) ?? byName.get(ref);
-}
-
-function quote(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-}
-
-/**
- * Rewrites every `prop("...")` argument through `map`, leaving the rest of the
- * source (including other strings and comments) untouched. Completed references
- * remain bound even while another part of the draft is incomplete. References
- * are the calls the editor draws as tokens (see {@link findFormulaPropCalls}).
- */
-function rewritePropRefs(source: string, map: (ref: string) => string | undefined): string {
-  let output = '';
-  let cursor = 0;
-
-  for (const call of findFormulaPropCalls(source)) {
-    const replacement = map(call.ref);
-
-    if (replacement === undefined) continue;
-    output += source.slice(cursor, call.refStart) + quote(replacement);
-    cursor = call.refEnd;
-  }
-
-  return output + source.slice(cursor);
-}
-
-/** Editor form → storage form: `prop("Price")` becomes `prop("<id of Price>")`. */
-export function toStorageExpression(displaySource: string, schema: FormulaFieldSchema[]): string {
-  return rewritePropRefs(displaySource, (ref) => resolveFormulaField(schema, ref)?.id);
-}
-
-/** Use names only when resolving them again preserves the referenced field. */
-export function toDisplayExpression(storageSource: string, schema: FormulaFieldSchema[]): string {
-  return rewritePropRefs(storageSource, (ref) => {
-    const entry = schemaIndex(schema).byId.get(ref);
-
-    return entry && resolveFormulaField(schema, entry.name)?.id === entry.id ? entry.name : undefined;
-  });
-}
-
-/** Insert the selected property, using its name only when it resolves back to that ID. */
-export function formulaPropertyReference(fieldId: string, schema: FormulaFieldSchema[]): string {
-  return toDisplayExpression(`prop(${quote(fieldId)})`, schema);
 }

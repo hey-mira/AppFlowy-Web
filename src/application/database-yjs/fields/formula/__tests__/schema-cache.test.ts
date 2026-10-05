@@ -3,14 +3,10 @@ import * as Y from 'yjs';
 import { FieldType } from '@/application/database-yjs/database.type';
 import { YDatabaseField, YjsDatabaseKey } from '@/application/types';
 
-import { compileFormula } from '../compile';
 import {
   formulaSchemaSignature,
-  hasFormulaSchemaSource,
   readFormulaSchema,
   readFormulaSchemaForVersion,
-  refreshFormulaSchema,
-  resolveFormulaField,
 } from '../schema';
 
 import { createFields } from './fixture';
@@ -33,20 +29,10 @@ describe('formula schema freshness', () => {
     serialized.mockReturnValue({
       [FieldType.Number]: { format: 0n, metadata: { revision: 9007199254740993n } },
     });
-    const changed = refreshFormulaSchema(first);
+    const changed = readFormulaSchema(fields);
 
     expect(changed).not.toBe(first);
     expect(formulaSchemaSignature(changed)).not.toBe(signature);
-  });
-
-  it('tracks source provenance only for snapshots returned by its readers', () => {
-    const fields = createFields([{ id: 'price', name: 'Price', type: FieldType.Number }]);
-    const original = readFormulaSchema(fields);
-
-    expect(hasFormulaSchemaSource(original)).toBe(true);
-    expect(hasFormulaSchemaSource(original.slice())).toBe(false);
-    fields.get('price').set(YjsDatabaseKey.name, 'Cost');
-    expect(hasFormulaSchemaSource(refreshFormulaSchema(original))).toBe(true);
   });
 
   it('shares validated snapshots until their version or content changes', () => {
@@ -55,13 +41,13 @@ describe('formula schema freshness', () => {
 
     expect(readFormulaSchemaForVersion(fields, 1)).toBe(first);
     expect(readFormulaSchema(fields)).toBe(first);
-    expect(refreshFormulaSchema(first)).toBe(first);
+    expect(readFormulaSchema(fields)).toBe(first);
 
     const nextVersion = readFormulaSchemaForVersion(fields, 2);
 
     expect(nextVersion).not.toBe(first);
     expect(readFormulaSchemaForVersion(fields, 2)).toBe(nextVersion);
-    expect(refreshFormulaSchema(first)).toBe(nextVersion);
+    expect(readFormulaSchema(fields)).toBe(nextVersion);
   });
 
   it('captures type options before their live handles change, even if the signature was never requested', () => {
@@ -81,60 +67,24 @@ describe('formula schema freshness', () => {
     expect(JSON.parse(formulaSchemaSignature(updated))[0][3]).toEqual({
       [FieldType.Formula]: { expression: '2' },
     });
-    expect(refreshFormulaSchema(first)).toBe(updated);
+    expect(readFormulaSchema(fields)).toBe(updated);
   });
 
-  it('refreshes names, types and cached lookups without subscribers or a new version', () => {
+  it('refreshes names and types without subscribers or a new version', () => {
     const fields = createFields([{ id: 'price', name: 'Price', type: FieldType.Number }]);
     const first = readFormulaSchemaForVersion(fields, 0);
 
-    expect(resolveFormulaField(first, 'Price')?.id).toBe('price');
+    expect(first[0]).toMatchObject({ id: 'price', name: 'Price', type: FieldType.Number });
     fields.get('price').set(YjsDatabaseKey.name, 'Cost');
     fields.get('price').set(YjsDatabaseKey.type, FieldType.RichText);
     const reopened = readFormulaSchemaForVersion(fields, 0);
 
     expect(reopened).not.toBe(first);
-    expect(resolveFormulaField(reopened, 'Price')).toBeUndefined();
-    expect(resolveFormulaField(reopened, 'Cost')?.type).toBe(FieldType.RichText);
-    expect(refreshFormulaSchema(first)).toBe(reopened);
+    expect(reopened[0]).toMatchObject({ id: 'price', name: 'Cost', type: FieldType.RichText });
+    expect(readFormulaSchema(fields)).toBe(reopened);
   });
 
-  it('recompiles a retained schema when a nested formula changes its inferred type', () => {
-    const fields = createFields([
-      { id: 'nested', name: 'Nested', type: FieldType.Formula, typeOption: { expression: '1' } },
-      { id: 'total', name: 'Total', type: FieldType.Formula, typeOption: { expression: 'prop("nested")' } },
-    ]);
-    const schema = readFormulaSchema(fields);
-    const expression = 'prop("nested")';
-
-    expect(compileFormula(expression, schema, 'total').resultType).toBe('number');
-    fields
-      .get('nested')
-      .get(YjsDatabaseKey.type_option)
-      .get(String(FieldType.Formula))
-      .set(YjsDatabaseKey.expression, '"text"');
-    const compiled = compileFormula(expression, schema, 'total');
-
-    expect(compiled.error).toBeUndefined();
-    expect(compiled.resultType).toBe('text');
-  });
-
-  it('refreshes standalone compilation lookups and types when its retained schema changes', () => {
-    const fields = createFields([{ id: 'price', name: 'Price', type: FieldType.Number }]);
-    const schema = readFormulaSchema(fields);
-
-    expect(compileFormula('prop("Price")', schema).resultType).toBe('number');
-    expect(compileFormula('prop("price")', schema).resultType).toBe('number');
-    fields.doc!.transact(() => {
-      fields.get('price').set(YjsDatabaseKey.name, 'Cost');
-      fields.get('price').set(YjsDatabaseKey.type, FieldType.RichText);
-    });
-    expect(compileFormula('prop("Price")', schema).error?.missingPropertyRef).toBe('Price');
-    expect(compileFormula('prop("price")', schema).resultType).toBe('text');
-    expect(compileFormula('prop("Cost")', schema).resultType).toBe('text');
-  });
-
-  it('keeps empty schema provenance across additions and deletions', () => {
+  it('refreshes empty snapshots across additions and deletions', () => {
     const fields = createFields([]);
     const empty = readFormulaSchema(fields);
     const field = new Y.Map() as YDatabaseField;
@@ -142,16 +92,16 @@ describe('formula schema freshness', () => {
     fields.set('price', field);
     field.set(YjsDatabaseKey.name, 'Price');
     field.set(YjsDatabaseKey.type, FieldType.Number);
-    const added = refreshFormulaSchema(empty);
+    const added = readFormulaSchema(fields);
 
     expect(added.map((entry) => entry.id)).toEqual(['price']);
     fields.delete('price');
-    const removed = refreshFormulaSchema(added);
+    const removed = readFormulaSchema(fields);
 
     expect(removed).toEqual([]);
     expect(removed).not.toBe(added);
-    expect(refreshFormulaSchema(empty)).toBe(removed);
-    expect(resolveFormulaField(removed, 'price')).toBeUndefined();
+    expect(readFormulaSchema(fields)).toBe(removed);
+    expect(removed.find((entry) => entry.id === 'price')).toBeUndefined();
   });
 
   it('replaces detached field handles even when all serialized contents match', () => {
@@ -160,13 +110,13 @@ describe('formula schema freshness', () => {
     const replacement = new Y.Map(Object.entries(fields.get('price').toJSON())) as YDatabaseField;
 
     fields.set('price', replacement);
-    const replaced = refreshFormulaSchema(first);
+    const replaced = readFormulaSchema(fields);
 
     expect(formulaSchemaSignature(replaced)).toBe(formulaSchemaSignature(first));
     expect(replaced).not.toBe(first);
     expect(replaced[0].field).toBe(replacement);
     replacement.set(YjsDatabaseKey.name, 'Cost');
-    expect(refreshFormulaSchema(first)[0].name).toBe('Cost');
+    expect(readFormulaSchema(fields)[0].name).toBe('Cost');
   });
 
   it('reads every mutation made between schema accesses inside one transaction', () => {
@@ -182,7 +132,7 @@ describe('formula schema freshness', () => {
 
       expect(formulaSchemaSignature(second)).not.toBe(formulaSchemaSignature(initial));
       option.set(YjsDatabaseKey.expression, '3');
-      const third = refreshFormulaSchema(initial);
+      const third = readFormulaSchema(fields);
 
       expect(formulaSchemaSignature(third)).not.toBe(formulaSchemaSignature(second));
       expect(JSON.parse(formulaSchemaSignature(third))[0][3][FieldType.Formula].expression).toBe('3');
@@ -196,7 +146,7 @@ describe('formula schema freshness', () => {
       const first = readFormulaSchemaForVersion(fields, 0);
 
       fields.get('price').set(YjsDatabaseKey.name, 'Cost');
-      const updated = refreshFormulaSchema(first);
+      const updated = readFormulaSchema(fields);
 
       expect(updated).not.toBe(first);
       expect(updated[0].name).toBe('Cost');
@@ -207,7 +157,7 @@ describe('formula schema freshness', () => {
     const fields = createFields([{ id: 'price', name: 'Price', type: FieldType.Number }]);
     const names: string[] = [];
     const observer = () => {
-      names.push(refreshFormulaSchema(first)[0].name);
+      names.push(readFormulaSchema(fields)[0].name);
     };
 
     fields.observeDeep(observer);
@@ -227,8 +177,8 @@ describe('formula schema freshness', () => {
 
     expect(second).not.toBe(first);
     firstFields.get('price').set(YjsDatabaseKey.name, 'Cost');
-    expect(refreshFormulaSchema(first)[0].name).toBe('Cost');
-    expect(refreshFormulaSchema(second)).toBe(second);
+    expect(readFormulaSchema(firstFields)[0].name).toBe('Cost');
+    expect(readFormulaSchema(secondFields)).toBe(second);
     expect(second[0].name).toBe('Price');
   });
 });
