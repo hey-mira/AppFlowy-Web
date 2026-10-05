@@ -14,9 +14,11 @@ import { evaluateRollupCell } from '@/application/database-yjs/rollup/cache';
 import {
   ComputedDependencyError,
   ComputedSession,
+  ComputedSourceUnavailableError,
   enterComputedCell,
   releaseComputedFormulaEngines,
 } from '@/application/database-yjs/rollup/computed';
+import { retainRollupSource } from '@/application/database-yjs/rollup/source-sync';
 import {
   YDatabase,
   YDatabaseRow,
@@ -80,7 +82,7 @@ type RuntimeOwner = { context: DatabaseContextState; rows?: Record<string, YDoc>
 type InputState =
   | { status: 'pending' }
   | { status: 'ready'; value: Value | null }
-  | { status: 'error'; error: string; source: 'host' | 'host-cycle' };
+  | { status: 'error'; error: string; source: 'host' | 'host-cycle'; retryable: boolean };
 type CompiledSchema = {
   signature: string;
   engine: FormulaEngineClient;
@@ -121,6 +123,8 @@ class NativeFormulaRuntime {
   private readonly history: boolean;
   private readonly historyNow = Date.now();
   private restoreRevision = getDatabaseDependencyRestoreRevision();
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private retryDelay = 250;
 
   constructor(private readonly databaseDoc: YDoc, private readonly contextKey: string) {
     this.history = contextKey !== 'live';
@@ -137,7 +141,7 @@ class NativeFormulaRuntime {
   refreshRestoredSources(revision: number) {
     if (this.history || revision === this.restoreRevision) return;
     this.restoreRevision = revision;
-    this.externalDocs.forEach((listener, doc) => doc.off('update', listener));
+    this.externalDocs.forEach((cleanup) => cleanup());
     this.externalDocs.clear();
     this.invalidate();
   }
@@ -247,13 +251,35 @@ class NativeFormulaRuntime {
   }
 
   private retireEpoch() {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     if (!this.epoch) return;
     this.epoch.retired = true;
     this.epoch.controller.abort();
     releaseComputedFormulaEngines(this.epoch.resources);
     this.epoch = undefined;
-    this.externalDocs.forEach((listener, doc) => doc.off('update', listener));
+    this.externalDocs.forEach((cleanup) => cleanup());
     this.externalDocs.clear();
+  }
+
+  private retryUnavailableSources(epoch: InputEpoch) {
+    const states = Array.from(epoch.inputs.values()).flatMap((inputs) => Array.from(inputs.values()));
+
+    // A pending sibling keeps its own load; retry only settled unavailable
+    // sources, and never native errors or deterministic cycle/type failures.
+    if (states.some((state) => state.status === 'pending')) return;
+    if (!states.some((state) => state.status === 'error' && state.retryable)) {
+      this.retryDelay = 250;
+      return;
+    }
+
+    if (this.retryTimer) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      if (this.epoch !== epoch || this.owners.size === 0) return;
+      this.retryDelay = Math.min(this.retryDelay * 2, 30_000);
+      this.invalidate();
+    }, this.retryDelay);
   }
 
   private syncClock() {
@@ -314,6 +340,7 @@ class NativeFormulaRuntime {
     const required = new Set(readyTargets.flatMap((id) => compiled.dependencies.get(id)!));
     const inputs = schema.filter((entry) => required.has(entry.id));
     const rowSources = Object.fromEntries(this.rowDocs);
+    const metadataDocuments = new WeakSet<YDoc>();
     const observe = (doc: YDoc) => {
       if (
         this.history ||
@@ -324,15 +351,50 @@ class NativeFormulaRuntime {
       )
         return;
       const listener = () => this.invalidate();
+      let release: (() => void) | undefined;
+      const cleanup = () => {
+        doc.off('update', listener);
+        release?.();
+      };
 
       doc.on('update', listener);
-      this.externalDocs.set(doc, listener);
+      this.externalDocs.set(doc, cleanup);
+      try {
+        if (metadataDocuments.has(doc)) release = retainRollupSource(owner.context, doc);
+      } catch (error) {
+        cleanup();
+        this.externalDocs.delete(doc);
+        throw error;
+      }
+
+      // A synchronous sync hydration can retire this epoch during binding.
+      if (!current()) {
+        cleanup();
+        this.externalDocs.delete(doc);
+      }
+    };
+
+    const loadView = owner.context.loadView;
+    const loaders: DatabaseContextState = {
+      ...owner.context,
+      loadView: loadView ? async (...args) => {
+        const doc = await loadView(...args);
+
+        if (doc) {
+          metadataDocuments.add(doc);
+          // Metadata-only loads do not own realtime sync, including cold docs.
+          observe(doc);
+        }
+
+        return doc;
+      } : undefined,
     };
 
     const failure = (error: unknown): InputState => ({
       status: 'error',
       error: error instanceof Error ? error.message : 'Formula input could not be loaded',
       source: error instanceof ComputedDependencyError ? 'host-cycle' : 'host',
+      retryable: error instanceof ComputedSourceUnavailableError,
     });
 
     this.epoch = epoch;
@@ -419,7 +481,7 @@ class NativeFormulaRuntime {
             rowId,
             history: this.history,
             rows: rowSources,
-            loaders: owner.context,
+            loaders,
           },
           [entry],
           session,
@@ -581,6 +643,7 @@ class NativeFormulaRuntime {
         properties,
         outcomes: new Map(Array.from(epoch.outcomes, ([id, results]) => [id, new Map(results)])),
       });
+      this.retryUnavailableSources(epoch);
     } catch (error) {
       if (current()) {
         this.retireEpoch();
@@ -605,7 +668,7 @@ class NativeFormulaRuntime {
     this.databaseDoc.off('update', this.onSchemaChange);
     this.databaseDoc.off('destroy', this.dispose);
     this.observedDocs.forEach((listener, doc) => doc.off('update', listener));
-    this.externalDocs.forEach((listener, doc) => doc.off('update', listener));
+    this.externalDocs.forEach((cleanup) => cleanup());
     this.observedDocs.clear();
     this.externalDocs.clear();
     this.releaseClock?.();
@@ -615,6 +678,7 @@ class NativeFormulaRuntime {
     this.compiled = undefined;
     this.rowDocs.clear();
     this.targets = [];
+    this.retryDelay = 250;
     this.snapshot = emptySnapshot;
   };
 }

@@ -51,8 +51,8 @@ export function formulaHostRuntime(now: number) {
   return { now: BigInt(Math.trunc(now)), time_zone: offset };
 }
 
-export function formulaSchemaUsesClock(schema: FormulaFieldSchema[]) {
-  return schema.some(
+export function formulaSchemaUsesClock(schema: FormulaFieldSchema[], candidateExpression = '') {
+  return /\b(?:now|today)\b/.test(candidateExpression) || schema.some(
     (entry) =>
       // A conservative clock subscription permits comments between the
       // native identifier and call. Syntax remains the engine's responsibility.

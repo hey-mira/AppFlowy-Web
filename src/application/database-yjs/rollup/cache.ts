@@ -33,7 +33,7 @@ import {
 } from '@/application/types';
 import { canonicalizeUserUid } from '@/application/user-uid';
 
-import { ComputedDependencyError, ComputedSession, enterComputedCell, evaluateRollupFormula, releaseComputedFormulaEngines } from './computed';
+import { ComputedDependencyError, ComputedSession, ComputedSourceUnavailableError, enterComputedCell, evaluateRollupFormula, releaseComputedFormulaEngines } from './computed';
 import { rememberRollupTarget } from './filter';
 
 import type { RollupSourceSync } from './source-sync';
@@ -235,7 +235,7 @@ async function loadRelatedDoc(
     const doc = await loadView?.(viewId, false, false, { databaseId, databaseMetadataOnly: true });
 
     if (!doc || !(await waitForDatabaseHydration(doc))) {
-      throw new Error(`Related database ${databaseId} could not be loaded for formula conversion`);
+      throw new ComputedSourceUnavailableError(`Related database ${databaseId} could not be loaded for formula conversion`);
     }
 
     return doc;
@@ -570,7 +570,11 @@ async function computeRollupCellValue(
 
   const viewId = await context.getViewIdFromDatabaseId?.(relationOption.database_id);
 
-  if (!viewId) return { value: '' };
+  if (!viewId) {
+    if (context.requireLoadedSources)
+      throw new ComputedSourceUnavailableError(`Related database ${relationOption.database_id} could not be resolved for formula evaluation`);
+    return { value: '' };
+  }
 
   const relatedDoc = await loadRelatedDoc(
     viewId,
@@ -588,7 +592,11 @@ async function computeRollupCellValue(
   const relatedFields = relatedDatabase?.get(YjsDatabaseKey.fields);
   const targetField = relatedFields?.get(rollupOption.target_field_id);
 
-  if (!relatedDatabase || !targetField) return { value: '' };
+  if (!relatedDatabase || !targetField) {
+    if (context.requireLoadedSources)
+      throw new ComputedSourceUnavailableError(`Rollup target property "${rollupOption.target_field_id}" could not be found in related database ${relationOption.database_id}`);
+    return { value: '' };
+  }
 
   rememberRollupTarget(rollupField, targetField);
   const storedTargetType = Number(targetField.get(YjsDatabaseKey.type)) as FieldType;

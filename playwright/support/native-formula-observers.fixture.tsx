@@ -156,9 +156,22 @@ base.view.get(K.row_orders).push(Object.keys(rows).map((id) => ({ id, height: 44
 const cached = new Y.Doc({ guid: related.doc.guid }) as YDoc;
 
 Y.applyUpdate(cached, Y.encodeStateAsUpdate(related.doc));
-type Mode = 'none' | 'zero' | 'zero-summary' | 'restore' | 'sync' | 'settings' | 'settings-dynamic';
+type Mode =
+  | 'none'
+  | 'zero'
+  | 'zero-summary'
+  | 'restore'
+  | 'sync'
+  | 'realtime'
+  | 'strict-view'
+  | 'strict-target'
+  | 'settings'
+  | 'settings-dynamic';
 let currentMode: Mode = 'none';
+let sourceViewAvailable = true;
 const forwardRemoteSchema = (update: Uint8Array) => Y.applyUpdate(cached, update);
+const ownershipListeners = new Set<() => void>();
+const notifyOwnership = () => ownershipListeners.forEach((notify) => notify());
 const context: DatabaseContextState = {
   databaseDoc: base.doc,
   databasePageId: base.doc.guid,
@@ -166,12 +179,26 @@ const context: DatabaseContextState = {
   workspaceId: 'workspace',
   readOnly: false,
   rowMap: rows,
-  getViewIdFromDatabaseId: async (id) => id,
+  getViewIdFromDatabaseId: async (id) => (sourceViewAvailable ? id : null),
   loadView: async (...args) => {
     evidence.metadataLoads.push(args);
-    return currentMode === 'sync' ? cached : related.doc;
+    return currentMode === 'sync' || currentMode === 'realtime' ? cached : related.doc;
   },
   createRow: async (key) => relatedRows[key.split('_rows_').pop()!],
+  bindViewSync: (doc, options) => {
+    if (currentMode !== 'realtime') return null;
+    if (doc !== cached || !options?.retain) throw new Error('Formula related metadata sync was not retained');
+    evidence.bindings += 1;
+    if (evidence.owners++ === 0) related.doc.on('update', forwardRemoteSchema);
+    notifyOwnership();
+    return { doc } as SyncContext;
+  },
+  scheduleDeferredCleanup: (id) => {
+    if (id !== cached.guid) throw new Error(`Unexpected Formula sync release ${id}`);
+    evidence.releases += 1;
+    if (--evidence.owners === 0) related.doc.off('update', forwardRemoteSchema);
+    notifyOwnership();
+  },
 };
 
 function setExpression(value: string) {
@@ -221,7 +248,7 @@ function restoreAmounts(values: [number, number]) {
 function configure(mode: Mode) {
   currentMode = mode;
   if (mode.startsWith('zero')) setExpression('0');
-  if (mode === 'restore') {
+  if (mode === 'restore' || mode === 'realtime') {
     const filter = new Y.Map() as YDatabaseFilter;
     const sort = new Y.Map() as YDatabaseSort;
 
@@ -236,6 +263,16 @@ function configure(mode: Mode) {
     sort.set(K.condition, SortCondition.Ascending);
     base.view.get(K.filters).push([filter]);
     base.view.get(K.sorts).push([sort]);
+  }
+
+  if (mode === 'strict-view' || mode === 'strict-target') {
+    base.fields
+      .get('twice')
+      .get(K.type_option)
+      .get(String(FieldType.Formula))
+      .set('expression', 'if(empty(prop("rollup")), 0, prop("rollup"))');
+    if (mode === 'strict-view') sourceViewAvailable = false;
+    else related.fields.delete('completed');
   }
 
   if (mode === 'settings') {
@@ -276,7 +313,11 @@ function OwnerFormula({ id, testId }: { id: string; testId: string }) {
   const cell = useCellSelector({ rowId: 'alpha', fieldId: id }) as FormulaCell | undefined;
 
   return (
-    <output data-testid={testId} data-evaluation-state={cell?.evaluationState ?? 'pending'}>
+    <output
+      data-testid={testId}
+      data-evaluation-state={cell?.evaluationState ?? 'pending'}
+      data-error-source={cell?.errorSource ?? ''}
+    >
       {cell?.error ?? cell?.data ?? ''}
     </output>
   );
@@ -286,6 +327,40 @@ function Conditions() {
   const orders = useRowOrdersSelector();
 
   return <output data-testid='observer-orders'>{orders?.map(({ id }) => id).join(',')}</output>;
+}
+
+function RealtimeConsumers() {
+  const [cellOpen, setCellOpen] = useState(true);
+  const [conditionsOpen, setConditionsOpen] = useState(true);
+  const owners = useSyncExternalStore(
+    (notify) => {
+      ownershipListeners.add(notify);
+      return () => {
+        ownershipListeners.delete(notify);
+      };
+    },
+    () => evidence.owners
+  );
+  const cachedExpression = useSyncExternalStore(
+    (notify) => subscribeSharedYjsDeep(cached.getMap(E.data_section), notify),
+    () =>
+      parseFormulaTypeOption((cached.getMap(E.data_section).get(E.database) as YDatabase).get(K.fields).get('completed'))
+        .formula
+  );
+
+  return (
+    <>
+      {cellOpen && <OwnerFormula id='twice' testId='owner-alpha-formula' />}
+      {conditionsOpen && <Conditions />}
+      <output data-testid='realtime-owners'>{owners}</output>
+      <output data-testid='realtime-cached-expression'>{cachedExpression}</output>
+      <button onClick={() => setCellOpen(false)}>Close Formula-only cell</button>
+      <button onClick={() => setConditionsOpen(false)}>Close Formula-only conditions</button>
+      <button onClick={() => setExpression('prop("amount") * 3')}>Remote standalone Formula times three</button>
+      <button onClick={() => setExpression('40 - prop("amount")')}>Remote standalone Formula reverse order</button>
+      <button onClick={() => setExpression('prop("amount") * 4')}>Remote standalone Formula times four</button>
+    </>
+  );
 }
 
 function RemoteObservers() {
@@ -420,6 +495,21 @@ function Fixture() {
         <button onClick={() => open('zero-summary')}>Open zero Sum and summary</button>
         <button onClick={() => open('restore')}>Open restored conditions</button>
         <button onClick={() => open('sync')}>Open remote schema observers</button>
+        <button onClick={() => open('realtime')}>Open Formula-only realtime consumers</button>
+        <button onClick={() => open('strict-view')}>Open unavailable Rollup view</button>
+        <button onClick={() => open('strict-target')}>Open unavailable Rollup target</button>
+        <button
+          onClick={() => {
+            sourceViewAvailable = true;
+          }}
+        >
+          Recover Rollup view
+        </button>
+        <button
+          onClick={() => addField(related.fields, 'completed', FieldType.Formula, { expression: 'prop("amount")' })}
+        >
+          Recover Rollup target
+        </button>
         <button onClick={() => open('settings')}>Open native target settings</button>
         <button onClick={() => open('settings-dynamic')}>Open saved dynamic Average settings</button>
         <button onClick={() => setRelation([])}>Clear first relation</button>
@@ -437,6 +527,8 @@ function Fixture() {
           </>
         )}
         {mode === 'sync' && <RemoteObservers />}
+        {mode === 'realtime' && <RealtimeConsumers />}
+        {mode.startsWith('strict') && <OwnerFormula id='twice' testId='owner-alpha-formula' />}
         {mode.startsWith('settings') && <TargetSettings />}
       </main>
     </DatabaseContext.Provider>

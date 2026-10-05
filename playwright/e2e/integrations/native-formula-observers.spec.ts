@@ -103,6 +103,62 @@ test('two Rollup observers retain remote Formula metadata until the last disposa
   await expect(page.getByTestId('sync-second')).toHaveText('30');
 });
 
+test('Formula-only cell and conditions retain related realtime metadata and release the last owner', async ({
+  page,
+}) => {
+  await page.getByRole('button', { name: 'Open Formula-only realtime consumers', exact: true }).click();
+  await expect(page.getByTestId('owner-alpha-formula')).toHaveText('20');
+  await expect(page.getByTestId('observer-orders')).toHaveText('beta');
+  await page.getByRole('button', { name: 'Remote standalone Formula times three', exact: true }).click();
+  await expect(page.getByTestId('owner-alpha-formula')).toHaveText('60');
+  await expect(page.getByTestId('observer-orders')).toHaveText('alpha,beta');
+  await expect(page.getByTestId('realtime-owners')).toHaveText('1');
+  await page.getByRole('button', { name: 'Close Formula-only cell', exact: true }).click();
+  await page.getByRole('button', { name: 'Remote standalone Formula reverse order', exact: true }).click();
+  await expect(page.getByTestId('observer-orders')).toHaveText('beta,alpha');
+  await expect(page.getByTestId('realtime-owners')).toHaveText('1');
+  await page.getByRole('button', { name: 'Close Formula-only conditions', exact: true }).click();
+  await expect(page.getByTestId('realtime-owners')).toHaveText('0');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const evidence = (window as unknown as { formulaObserverEvidence: { workers: number; terminated: number } })
+          .formulaObserverEvidence;
+
+        return evidence.terminated === evidence.workers;
+      })
+    )
+    .toBe(true);
+  const requests = await page.evaluate(
+    () =>
+      (window as unknown as { formulaObserverEvidence: { requests: unknown[] } }).formulaObserverEvidence.requests.length
+  );
+
+  await page.getByRole('button', { name: 'Remote standalone Formula times four', exact: true }).click();
+  await expect(page.getByTestId('realtime-cached-expression')).toHaveText('40 - prop("amount")');
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { formulaObserverEvidence: { requests: unknown[] } }).formulaObserverEvidence.requests
+          .length
+    )
+  ).toBe(requests);
+});
+
+for (const source of ['view', 'target']) {
+  test(`required Rollup ${source} failure cannot become an ordinary null in a Formula`, async ({ page }) => {
+    await page.getByRole('button', { name: `Open unavailable Rollup ${source}`, exact: true }).click();
+    const formula = page.getByTestId('owner-alpha-formula');
+
+    await expect(formula).toHaveAttribute('data-evaluation-state', 'error');
+    await expect(formula).toHaveAttribute('data-error-source', 'host');
+    await expect(formula).toContainText(source === 'view' ? 'database' : 'completed');
+    await page.getByRole('button', { name: `Recover Rollup ${source}`, exact: true }).click();
+    await expect(formula).toHaveAttribute('data-evaluation-state', 'value');
+    await expect(formula).toHaveText('10');
+  });
+}
+
 // Settings must get native static metadata without a visible target cell and
 // refresh saved/stale selections when the target Formula's result type changes.
 test('Rollup settings compile unmounted Formula targets and refresh result types', async ({ page }) => {

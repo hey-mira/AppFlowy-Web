@@ -5,6 +5,9 @@ import type { RollupCellValue, RollupComputeContext } from './cache';
 
 export class ComputedDependencyError extends Error {}
 
+/** A required external view/schema can recover without edits to the owning row. */
+export class ComputedSourceUnavailableError extends Error {}
+
 /** One evaluation path crosses database boundaries without sharing an in-flight cache promise. */
 export interface ComputedSession {
   signal?: AbortSignal;
