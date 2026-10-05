@@ -1,4 +1,3 @@
-import type { RowError, Value } from '@notion-formula/sdk';
 import React from 'react';
 import * as Y from 'yjs';
 
@@ -7,6 +6,8 @@ import type { FormulaType, FormulaValue } from '@/application/database-yjs/field
 import { NumberFormat } from '@/application/database-yjs/fields/number/number.type';
 import { RollupVisualizationOption } from '@/application/database-yjs/fields/rollup/rollup.type';
 import { DateFormat, FieldId, RowId, TimeFormat } from '@/application/types';
+
+import type { RowError, Value } from '@notion-formula/sdk';
 
 export interface Cell {
   createdAt: number;
@@ -116,6 +117,7 @@ export interface RollupListItem {
 export interface RollupCell extends Cell {
   fieldType: FieldType.Rollup;
   data: string;
+  error?: string;
   rawNumeric?: number;
   list?: string[];
   listItems?: RollupListItem[];

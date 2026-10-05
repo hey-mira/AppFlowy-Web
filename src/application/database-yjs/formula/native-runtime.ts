@@ -15,7 +15,6 @@ import {
 } from '@/application/database-yjs/rollup/computed';
 import {
   YDatabase,
-  YDatabaseField,
   YDatabaseRow,
   YDoc,
   YjsDatabaseKey as K,
@@ -36,7 +35,10 @@ import {
   nativePropertyDefinition,
   nativePropertyType,
   readNativeInput,
+  rememberNativeFormulaPropertyState,
 } from './native-values';
+
+export { getNativeFormulaPropertyState } from './native-values';
 
 import type { FormulaEngineClient, PropertyState, Value } from '@notion-formula/sdk';
 
@@ -57,12 +59,6 @@ const emptySnapshot: NativeFormulaSnapshot = {
 const noSubscription = () => () => undefined;
 const disabledSnapshot = () => emptySnapshot;
 const runtimes = new WeakMap<YDoc, Map<string, NativeFormulaRuntime>>();
-const fieldStates = new WeakMap<YDatabaseField, PropertyState>();
-
-/** Synchronous menus can read the same native static type as subscribed cells. */
-export function getNativeFormulaPropertyState(field: YDatabaseField): PropertyState | undefined {
-  return fieldStates.get(field);
-}
 
 export function nativeFormulaOutcome(
   snapshot: NativeFormulaSnapshot,
@@ -215,7 +211,7 @@ class NativeFormulaRuntime {
     if (schema) {
       const database = this.databaseDoc.getMap(E.data_section).get(E.database) as YDatabase | undefined;
 
-      database?.get(K.fields)?.forEach((field) => fieldStates.delete(field));
+      database?.get(K.fields)?.forEach((field) => rememberNativeFormulaPropertyState(field));
     }
 
     this.publish({
@@ -469,7 +465,7 @@ class NativeFormulaRuntime {
       schema.forEach((entry) => {
         const state = properties.get(entry.id);
 
-        if (state) fieldStates.set(entry.field, state);
+        rememberNativeFormulaPropertyState(entry.field, state);
       });
       const targets = this.targets.filter((id) => properties.get(id) && 'Formula' in properties.get(id)!);
       const readyTargets = targets.filter((id) => {

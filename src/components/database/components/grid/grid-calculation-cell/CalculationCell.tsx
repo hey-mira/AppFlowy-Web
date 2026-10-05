@@ -110,6 +110,8 @@ export function CalculationCell ({ cell }: CalculationCellProps) {
     const readValue = () => {
       const value = cell?.value;
 
+      if (fieldType === FieldType.Formula && ['NaN', 'Infinity', '-Infinity', '-0'].includes(value ?? '')) return value;
+
       if (value === undefined || isNaN(parseInt(value))) return '0';
 
       const data = EnhancedBigStats.parse(value) || '0';
@@ -134,7 +136,7 @@ export function CalculationCell ({ cell }: CalculationCellProps) {
     };
 
     setNum(readValue());
-  }, [cell?.value, format, prefix, isCount]);
+  }, [cell?.value, format, prefix, isCount, fieldType]);
 
   return (
     <Tooltip delayDuration={1500}>

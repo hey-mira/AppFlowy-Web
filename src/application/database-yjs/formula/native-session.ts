@@ -15,7 +15,7 @@ import { isDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/i
 import { readRelationMembership } from '@/application/database-yjs/relation/cache';
 import { getRelationRowIdsFromCell } from '@/application/database-yjs/relation/cell';
 import { RollupCellValue, RollupComputeContext } from '@/application/database-yjs/rollup/cache';
-import { ComputedSession } from '@/application/database-yjs/rollup/computed';
+import { ComputedSession, enterComputedCell } from '@/application/database-yjs/rollup/computed';
 import { waitForDatabaseRowHydration } from '@/application/database-yjs/row.hydration';
 import { getRowKey } from '@/application/database-yjs/row_meta';
 import {
@@ -36,6 +36,7 @@ import {
   NativeFormulaOutcome,
   projectNativeFormulaResult,
   readNativeInput,
+  rememberNativeFormulaPropertyState,
 } from './native-values';
 
 import type { Column, FormulaEngineClient, PropertyState, Value } from '@notion-formula/sdk';
@@ -53,7 +54,9 @@ export function formulaHostRuntime(now: number) {
 export function formulaSchemaUsesClock(schema: FormulaFieldSchema[]) {
   return schema.some(
     (entry) =>
-      entry.type === FieldType.Formula && /\b(?:now|today)\s*\(/.test(parseFormulaTypeOption(entry.field).formula)
+      // A conservative clock subscription permits comments between the
+      // native identifier and call. Syntax remains the engine's responsibility.
+      entry.type === FieldType.Formula && /\b(?:now|today)\b/.test(parseFormulaTypeOption(entry.field).formula)
   );
 }
 
@@ -67,6 +70,23 @@ export function nativeEngineForSession(doc: YDoc, session: ComputedSession) {
   }
 
   return lease;
+}
+
+/** Resolve static type even when the target database has no mounted formula cells. */
+export async function nativeFormulaPropertyInSession(
+  source: { database: YDatabase; baseDoc: YDoc; fieldId: string },
+  session: ComputedSession
+) {
+  const schema = readFormulaSchema(source.database.get(K.fields));
+  const engine = await nativeEngineForSession(source.baseDoc, session).synchronize({
+    properties: schema.map(nativePropertyDefinition),
+  });
+  const state = await engine.getProperty(source.fieldId);
+
+  const field = source.database.get(K.fields).get(source.fieldId);
+
+  if (field) rememberNativeFormulaPropertyState(field, state);
+  return state;
 }
 
 export type NativeRowSource = {
@@ -180,7 +200,15 @@ export async function resolveNativeRowInputs(
   ]);
 
   if (session.signal?.aborted) throw new DOMException('Formula evaluation cancelled', 'AbortError');
-  const names = memberNames(members ?? []);
+  const rollupNeedsMembers = rollupValues.some(
+    ([, value]) =>
+      value.targetFieldType !== undefined &&
+      [FieldType.Person, FieldType.CreatedBy, FieldType.LastEditedBy].includes(value.targetFieldType)
+  );
+
+  if (rollupNeedsMembers) session.usesPeople?.();
+  const resolvedMembers = members ?? (rollupNeedsMembers ? await loadMentionableUsers(source.loaders.workspaceId) : []);
+  const names = memberNames(resolvedMembers);
   const values = new Map(rollupValues);
   const context: ReadFieldValueContext = {
     ...names,
@@ -219,6 +247,87 @@ export function nativeFormulaStates(properties: PropertyState[]) {
   );
 }
 
+/** One fresh batch for a permanent host operation, never a display-cache read. */
+export async function evaluateNativeFormulaBatch(
+  source: {
+    database: YDatabase;
+    baseDoc: YDoc;
+    fieldId: string;
+    rows: Record<string, YDoc>;
+    loaders: RelatedRowLoaders;
+  },
+  session: ComputedSession,
+  computeRollup: (context: RollupComputeContext, session: ComputedSession) => Promise<RollupCellValue>
+): Promise<Map<string, FormulaCellResult>> {
+  const schema = readFormulaSchema(source.database.get(K.fields));
+  const field = source.database.get(K.fields).get(source.fieldId);
+  const engine = await nativeEngineForSession(source.baseDoc, session).synchronize({
+    properties: schema.map(nativePropertyDefinition),
+  });
+  const state = await engine.getProperty(source.fieldId);
+
+  if (field) rememberNativeFormulaPropertyState(field, state);
+  const rowIds = Object.keys(source.rows);
+
+  if (!state || 'Input' in state || state.Formula.status === 'NotReady') {
+    return new Map(
+      rowIds.map((id) => [
+        id,
+        projectNativeFormulaResult(
+          {
+            status: 'not-ready',
+            resultType: 'any',
+            error: 'Formula is not ready: check its property references, types and dependencies',
+          },
+          field
+        ),
+      ])
+    );
+  }
+
+  const required = new Set(await engine.requiredInputs([source.fieldId]));
+  const inputs = schema.filter((entry) => required.has(entry.id));
+  const values: Map<string, Value | null>[] = [];
+
+  for (let index = 0; index < rowIds.length; index += 24) {
+    values.push(
+      ...(await Promise.all(
+        rowIds.slice(index, index + 24).map(async (rowId) => {
+          const row = source.rows[rowId].getMap(E.data_section).get(E.database_row) as YDatabaseRow;
+          const current = enterComputedCell({ ...source, rowId, row, rollupField: field }, session, true);
+
+          return resolveNativeRowInputs(
+            { ...source, rowId, row, history: isDatabaseHistoryDocumentImmutable(source.baseDoc) },
+            inputs,
+            current,
+            computeRollup
+          );
+        })
+      ))
+    );
+  }
+
+  const result = await engine.evaluate({
+    row_ids: rowIds,
+    formula_ids: [source.fieldId],
+    columns: nativeBatchColumns(schema, values),
+    runtime: formulaHostRuntime(session.now),
+  });
+  const output = result.formulas.get(source.fieldId);
+
+  return new Map(
+    rowIds.map((id, index) => [
+      id,
+      projectNativeFormulaResult(
+        output && 'Ok' in output
+          ? nativeOutputOutcome(output.Ok, index)
+          : { status: 'not-ready', resultType: 'any', error: 'Formula is not ready' },
+        field
+      ),
+    ])
+  );
+}
+
 export async function evaluateNativeFormulaInSession(
   context: RollupComputeContext,
   session: ComputedSession,
@@ -229,6 +338,8 @@ export async function evaluateNativeFormulaInSession(
     properties: schema.map(nativePropertyDefinition),
   });
   const state = await engine.getProperty(context.fieldId);
+
+  rememberNativeFormulaPropertyState(context.rollupField, state);
 
   if (!state || 'Input' in state || state.Formula.status === 'NotReady') {
     return projectNativeFormulaResult(

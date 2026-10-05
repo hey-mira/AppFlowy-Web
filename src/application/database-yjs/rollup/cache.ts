@@ -1,5 +1,6 @@
 import Big from 'big.js';
 
+import { isNumericCalculation } from '@/application/database-yjs/calculation';
 import { parseYDatabaseCellToCell } from '@/application/database-yjs/cell.parse';
 import { DateTimeCell, RollupListItem } from '@/application/database-yjs/cell.type';
 import { waitForDatabaseHydration } from '@/application/database-yjs/database.hydration';
@@ -431,6 +432,10 @@ function formatDuration(seconds: number): string {
 function formatNumericResult(field: YDatabaseField, value: number): string {
   const fieldType = Number(field.get(YjsDatabaseKey.type)) as FieldType;
 
+  if (fieldType === FieldType.Formula && (!Number.isFinite(value) || Object.is(value, -0))) {
+    return Object.is(value, -0) ? '-0' : String(value);
+  }
+
   if (fieldType === FieldType.Number || fieldType === FieldType.Formula) {
     const format = parseNumberTypeOptions(field).format;
 
@@ -587,6 +592,20 @@ async function computeRollupCellValue(
 
   rememberRollupTarget(rollupField, targetField);
   const storedTargetType = Number(targetField.get(YjsDatabaseKey.type)) as FieldType;
+  const requiresNumericFormula = storedTargetType === FieldType.Formula &&
+    showAs !== RollupDisplayMode.OriginalList && showAs !== RollupDisplayMode.UniqueList &&
+    isNumericCalculation(calculationType);
+
+  if (storedTargetType === FieldType.Formula) {
+    const { nativeFormulaPropertyInSession } = await import('../formula/native-session');
+
+    await nativeFormulaPropertyInSession({
+      database: relatedDatabase,
+      baseDoc: relatedDoc,
+      fieldId: rollupOption.target_field_id,
+    }, session);
+  }
+
   const targetFieldType =
     storedTargetType === FieldType.Formula ? formulaPredicateFieldType(targetField, relatedFields) : storedTargetType;
   const withTargetFieldType = (result: RollupCellValue): RollupCellValue => ({
@@ -668,6 +687,14 @@ async function computeRollupCellValue(
       );
 
       if (result.error) throw new Error(result.error);
+      if (requiresNumericFormula && result.value.type !== 'empty') {
+        if (result.rawNumeric === undefined) {
+          throw new Error(`Rollup ${CalculationType[calculationType]} requires Number values; related row ${relatedRowId} returned ${result.value.type}`);
+        }
+
+        numericValues.push(result.rawNumeric);
+      }
+
       text = result.text;
       parsedData = result.rawNumeric ?? result.rawBoolean ?? result.rawDate?.start ?? text;
       filterData = parsedData;
@@ -718,9 +745,14 @@ async function computeRollupCellValue(
 
     if (targetFieldType === FieldType.Relation) filterData = getRelationRowIdsFromCell(cell);
     if (targetFieldType === FieldType.Number && parsedData !== undefined && parsedData !== '') {
-      text = stringifyDesktopNumberValue(String(parsedData), parseNumberTypeOptions(targetField).format);
+      const nativeSpecial = storedTargetType === FieldType.Formula && typeof parsedData === 'number' &&
+        (!Number.isFinite(parsedData) || Object.is(parsedData, -0));
+
+      if (!nativeSpecial) text = stringifyDesktopNumberValue(String(parsedData), parseNumberTypeOptions(targetField).format);
       // Native number list predicates use displayed percent units, once.
       try {
+        if (nativeSpecial) filterData = parsedData;
+        else
         filterData = new Big(String(parsedData))
           .times(parseNumberTypeOptions(targetField).format === NumberFormat.Percent ? 100 : 1)
           .toFixed();
@@ -743,8 +775,9 @@ async function computeRollupCellValue(
       collectedListItems.push({ label: text, rowId: relatedRowId, viewId });
     }
 
-    if (targetFieldType === FieldType.Number) {
-      const numeric = parseNumber(parsedData ?? text);
+    if (targetFieldType === FieldType.Number && !requiresNumericFormula) {
+      const numeric = storedTargetType === FieldType.Formula && typeof parsedData === 'number'
+        ? parsedData : parseNumber(parsedData ?? text);
 
       if (numeric !== null) {
         numericValues.push(numeric);

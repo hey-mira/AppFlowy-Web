@@ -29,15 +29,11 @@ import {
 } from '@/application/database-yjs/context';
 import { decodeCellToText } from '@/application/database-yjs/decode';
 import {
-  collectFormulaExternalReferences,
-  evaluateFormulaCell,
   FormulaType,
   getDateCellStr,
   getFieldDateTimeFormats,
   getTypeOptions,
-  NO_EXTERNAL_REFERENCES,
   parsePersonTypeOptions,
-  readFormulaSchema,
   parseRelationTypeOption,
   parseRollupTypeOption,
   parseRollupVisualizationOption,
@@ -51,15 +47,9 @@ import {
   hasEffectiveFilters,
   parseFilter,
 } from '@/application/database-yjs/filter';
-import { useFormulaClock } from '@/application/database-yjs/formula/clock';
+import { useNativeFormulaColumnValues } from '@/application/database-yjs/formula/native-column';
 import { nativeFormulaOutcome, useNativeFormulaRuntime } from '@/application/database-yjs/formula/native-runtime';
 import { nativePropertyType, projectNativeFormulaCell, projectNativeFormulaResult } from '@/application/database-yjs/formula/native-values';
-import {
-  formulaRowContext,
-  historicalFormulaRowContext,
-  memberNames,
-} from '@/application/database-yjs/formula/read-context';
-import { FormulaRowSources, useFormulaRelationTitles } from '@/application/database-yjs/formula/useFormulaRelationTitles';
 import { DEFAULT_GALLERY_LAYOUT_SETTINGS } from '@/application/database-yjs/gallery-layout';
 import {
   areGroupRowsHydrated,
@@ -83,6 +73,7 @@ import {
 } from '@/application/database-yjs/hooks';
 import { useTimelineRowSource } from '@/application/database-yjs/hooks/TimelineRowValuesProvider';
 import { useTimelineRowValues } from '@/application/database-yjs/hooks/useTimelineRowValues';
+import { isDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
 import { createLocalFirstObserver } from '@/application/database-yjs/local-first-observer';
 import { createNumberGroupingPolicy, NumberGroupingPolicy } from '@/application/database-yjs/number-grouping';
 import {
@@ -155,7 +146,6 @@ import {
   RollupDisplayMode,
   SortCondition,
 } from './database.type';
-import { useDatabaseFieldsVersion } from './hooks/useDatabaseFieldsVersion';
 import { useRelativeDateFilterRefresh } from './hooks/useRelativeDateFilterRefresh';
 
 
@@ -674,11 +664,20 @@ export function useFiltersSelector() {
   return filters;
 }
 
+function useNativeFilterProperties(fields: YDatabaseFields | undefined, filters: YDatabaseFilters | undefined) {
+  const formulaIds = conditionFormulaFields(fields, undefined, filters).map((field) =>
+    String(field.get(YjsDatabaseKey.id))
+  );
+
+  return useNativeFormulaRuntime({ enabled: formulaIds.length > 0, formulaIds }).properties;
+}
+
 export function useFilterSelector(filterId: string) {
   const database = useDatabase();
   const viewId = useDatabaseViewId();
   const fields = database?.get(YjsDatabaseKey.fields);
   const view = database?.get(YjsDatabaseKey.views)?.get(viewId);
+  const nativeProperties = useNativeFilterProperties(fields, view?.get(YjsDatabaseKey.filters));
   const filter = view
     ?.get(YjsDatabaseKey.filters)
     ?.toArray()
@@ -711,7 +710,7 @@ export function useFilterSelector(filterId: string) {
       fields.unobserveDeep(observerEvent);
       filter.unobserveDeep(observerEvent);
     };
-  }, [fields, filter]);
+  }, [fields, filter, nativeProperties]);
   return filterValue;
 }
 
@@ -797,6 +796,7 @@ export function useAdvancedFiltersSelector() {
   const fields = database?.get(YjsDatabaseKey.fields);
   const view = database?.get(YjsDatabaseKey.views)?.get(viewId);
   const filtersArray = view?.get(YjsDatabaseKey.filters);
+  const nativeProperties = useNativeFilterProperties(fields, filtersArray);
   const [filters, setFilters] = useState<Filter[]>([]);
 
   useEffect(() => {
@@ -851,7 +851,7 @@ export function useAdvancedFiltersSelector() {
       filtersArray.unobserveDeep(observerEvent);
       fields.unobserveDeep(observerEvent);
     };
-  }, [fields, filtersArray]);
+  }, [fields, filtersArray, nativeProperties]);
 
   return filters;
 }
@@ -865,6 +865,7 @@ export function useAdvancedFilterSelector(filterId: string) {
   const fields = database?.get(YjsDatabaseKey.fields);
   const view = database?.get(YjsDatabaseKey.views)?.get(viewId);
   const filtersArray = view?.get(YjsDatabaseKey.filters);
+  const nativeProperties = useNativeFilterProperties(fields, filtersArray);
   const [filterValue, setFilterValue] = useState<Filter | null>(null);
 
   useEffect(() => {
@@ -973,7 +974,7 @@ export function useAdvancedFilterSelector(filterId: string) {
       filtersArray.unobserveDeep(observerEvent);
       fields.unobserveDeep(observerEvent);
     };
-  }, [fields, filterId, filtersArray]);
+  }, [fields, filterId, filtersArray, nativeProperties]);
 
   return filterValue;
 }
@@ -2258,9 +2259,11 @@ function conditionFormulaFields(
   if (!fields || !(sorts?.length || filters?.length)) return [];
   const ids = new Set<string>();
 
-  sorts?.forEach((sort) => { const id = sort.get(YjsDatabaseKey.field_id);
+  sorts?.forEach((sort) => {
+    const id = sort.get(YjsDatabaseKey.field_id);
 
- if (id) ids.add(id); });
+    if (id) ids.add(id);
+  });
   const visit = (value: unknown) => {
     if (!value || typeof value !== 'object') return;
     const node = value as Record<string, unknown>;
@@ -2272,7 +2275,8 @@ function conditionFormulaFields(
   };
 
   (filters?.toJSON() as unknown[] | undefined)?.forEach(visit);
-  return Array.from(ids).map((id) => fields.get(id))
+  return Array.from(ids)
+    .map((id) => fields.get(id))
     .filter((field): field is YDatabaseField => Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula);
 }
 
@@ -2309,7 +2313,7 @@ export function useRowOrdersSelector() {
     blobPrefetchComplete,
     seedsReady,
   } = useDatabaseContext();
-  const isHistory = dataSource?.type === 'history';
+  const isHistory = dataSource?.type === 'history' || isDatabaseHistoryDocumentImmutable(databaseDoc);
   const hasAttributionSort =
     sorts?.toArray().some((sort) => {
       const field = fields?.get(sort.get(YjsDatabaseKey.field_id));
@@ -2924,7 +2928,8 @@ function useRollupCellValue({
   const [relationRowIdsKey, setRelationRowIdsKey] = useState('');
   const [relatedObserverRevision, setRelatedObserverRevision] = useState(0);
   const fieldType = Number(field?.get(YjsDatabaseKey.type)) as FieldType;
-  const restoreRevision = useDatabaseDependencyRestoreRevision(fieldType === FieldType.Rollup && dataSource?.type !== 'history');
+  const isHistory = dataSource?.type === 'history' || isDatabaseHistoryDocumentImmutable(databaseDoc);
+  const restoreRevision = useDatabaseDependencyRestoreRevision(fieldType === FieldType.Rollup && !isHistory);
   const cellId = `${rowId}:${fieldId}`;
   const rollupOption = useMemo(() => {
     if (!field) return undefined;
@@ -2933,7 +2938,7 @@ function useRollupCellValue({
     return parseRollupTypeOption(field);
   }, [field, fieldClock]);
   const rollupContext = useMemo(() => {
-    if (!database || !row || !field || dataSource?.type === 'history') return null;
+    if (!database || !row || !field || isHistory) return null;
     return {
       baseDoc: databaseDoc,
       database,
@@ -2950,7 +2955,7 @@ function useRollupCellValue({
     };
   }, [
     database, row, field, rowId, fieldId, databaseDoc, loadView, createRow,
-    getViewIdFromDatabaseId, workspaceId, bindViewSync, scheduleDeferredCleanup, dataSource,
+    getViewIdFromDatabaseId, workspaceId, bindViewSync, scheduleDeferredCleanup, isHistory,
   ]);
 
   useEffect(() => {
@@ -3210,6 +3215,7 @@ function useRollupCellValue({
     lastModified: 0,
     fieldType: FieldType.Rollup,
     data: value.value,
+    error: value.error,
     rawNumeric: value.rawNumeric,
     list: value.list,
     listItems: value.listItems,
@@ -3274,7 +3280,8 @@ export function useFormulaResultType(fieldId: string): FormulaType {
 }
 
 export function useCellSelector({ rowId, fieldId }: { rowId: string; fieldId: string }) {
-  const { dataSource } = useDatabaseContext();
+  const { dataSource, databaseDoc } = useDatabaseContext();
+  const isHistory = dataSource?.type === 'history' || isDatabaseHistoryDocumentImmutable(databaseDoc);
   const { row } = useRowDataSelector(rowId);
   const cells = row?.get(YjsDatabaseKey.cells);
   const { field, clock: fieldClock } = useFieldSelector(fieldId);
@@ -3331,7 +3338,7 @@ export function useCellSelector({ rowId, fieldId }: { rowId: string; fieldId: st
     };
   }, [cells, cell, field, fieldId]);
 
-  if (fieldType === FieldType.Rollup && dataSource?.type !== 'history') {
+  if (fieldType === FieldType.Rollup && !isHistory) {
     return rollupCell;
   }
 
@@ -3789,111 +3796,25 @@ export const useRowMetaSelector = (rowId: string) => {
   return meta;
 };
 
-/**
- * Evaluates a formula column for footer calculations: numbers stay numeric so
- * Sum and Average work. Undefined for other fields. The evaluator changes
- * whenever results can change: the schema, member names, or related titles
- * and rollup results arriving.
- */
-export function useFormulaColumnEvaluator(fieldId: string, rowSources?: FormulaRowSources) {
-  const fields = useDatabaseFields();
-  const rowMap = useRowMap();
-  const { field, clock: fieldClock } = useFieldSelector(fieldId);
-  const isFormula = Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula;
-  // Only a formula column recalculates when another field changes.
-  const fieldsVersion = useDatabaseFieldsVersion(isFormula);
-  const database = useDatabase();
-  const { databaseDoc, loadView, createRow, getViewIdFromDatabaseId, workspaceId, dataSource } = useDatabaseContext();
-  const isHistory = dataSource?.type === 'history';
-  const references = useMemo(() => {
-    void fieldsVersion;
-    return isFormula && field ? collectFormulaExternalReferences(field, readFormulaSchema(fields)) : NO_EXTERNAL_REFERENCES;
-  }, [isFormula, field, fields, fieldsVersion]);
-
-  useFormulaRelationTitles(references.relations, rowSources ?? { rows: rowMap });
-  const clock = useFormulaClock(!isHistory && references.clock);
-  const { users } = useMentionableUsersWithAutoFetch(!isHistory && references.people);
-  const members = useMemo(() => memberNames(isHistory ? [] : users), [users, isHistory]);
-  // Related titles and rollup results arrive asynchronously; recalculate once they settle.
-  const [externalRevision, setExternalRevision] = useState(0);
-  const readsRelatedData = references.relations.length > 0 || references.rollups.length > 0;
-  const rollupFieldIds = useMemo(() => references.rollups.map((entry) => entry.id), [references]);
-  const refreshRollups = useCallback(() => setExternalRevision((revision) => revision + 1), []);
-
-  useRollupFieldObservers(refreshRollups, fieldsVersion, {
-    ...rowSources,
-    rollupFieldIds,
-    observeConditions: false,
-  });
-
-  useEffect(() => {
-    if (isHistory || !readsRelatedData) return;
-    const bump = debounce(() => setExternalRevision((revision) => revision + 1), 300);
-    const unsubscribeLabels = subscribeRelationGroupLabels(bump);
-    const unsubscribeRollups = subscribeRollupCache(bump);
-
-    return () => {
-      bump.cancel();
-      unsubscribeLabels();
-      unsubscribeRollups();
-    };
-  }, [readsRelatedData, isHistory]);
-
-  return useMemo(() => {
-    if (!isFormula || !field) return undefined;
-    void fieldClock;
-    void fieldsVersion;
-    void externalRevision;
-    void clock;
-    const schema = readFormulaSchema(fields);
-    const loaders = { loadView, createRow, getViewIdFromDatabaseId, workspaceId };
-
-    return (rowId: string, row: YDatabaseRow): number | string => {
-      const result = evaluateFormulaCell({
-        ...(isHistory
-          ? historicalFormulaRowContext(rowId, row, { database, baseDoc: databaseDoc, rows: rowMap })
-          : formulaRowContext(rowId, row, { members, database, baseDoc: databaseDoc, loaders })),
-        schema,
-        field,
-        fieldId,
-        row,
-        rowId,
-      });
-
-      return result.rawNumeric ?? result.text;
-    };
-  }, [
-    isFormula,
-    field,
-    fieldClock,
-    fieldsVersion,
-    externalRevision,
-    clock,
-    fields,
-    fieldId,
-    members,
-    database,
-    databaseDoc,
-    loadView,
-    createRow,
-    getViewIdFromDatabaseId,
-    workspaceId,
-    isHistory,
-    rowMap,
-  ]);
-}
-
 export const useFieldCellsByRowsSelector = (fieldId: string, rows?: Row[]) => {
   const [cells, setCells] = useState<Map<string, unknown> | null>(null);
   const rowMap = useRowMap();
-  const { dataSource } = useDatabaseContext();
-  const isHistory = dataSource?.type === 'history';
+  const { dataSource, databaseDoc } = useDatabaseContext();
+  const isHistory = dataSource?.type === 'history' || isDatabaseHistoryDocumentImmutable(databaseDoc);
   const { field, clock: fieldClock } = useFieldSelector(fieldId);
   // A formula column has no stored cell; the footer calculates over its results.
   const rowIds = useMemo(() => rows?.map(({ id }) => id) ?? [], [rows]);
-  const evaluateFormula = useFormulaColumnEvaluator(fieldId, { rows: rowMap, rowIds });
+  const isFormula = Number(field?.get(YjsDatabaseKey.type)) === FieldType.Formula;
+  const background = useBackgroundRowDocLoader(isFormula);
+  const formula = useNativeFormulaColumnValues(fieldId, {
+    rows: rowMap,
+    rowIds,
+    getCachedRowDocs: background.getCachedRowDocs,
+    subscribeToCachedRowDocChanges: background.subscribeToCachedRowDocChanges,
+  });
 
   useEffect(() => {
+    if (isFormula) return;
     if (!rows || !rowMap) {
       setCells(null);
       return;
@@ -3912,7 +3833,6 @@ export const useFieldCellsByRowsSelector = (fieldId: string, rows?: Row[]) => {
 
       const cells = databaseRow.get(YjsDatabaseKey.cells);
       const getCellValue = () => {
-        if (evaluateFormula) return evaluateFormula(row.id, databaseRow);
         const cell = databaseRow.get(YjsDatabaseKey.cells)?.get(fieldId);
 
         const value = cell ? parseYDatabaseCellToCell(cell, field).data : '';
@@ -3933,8 +3853,7 @@ export const useFieldCellsByRowsSelector = (fieldId: string, rows?: Row[]) => {
 
       nextCells.set(row.id, getCellValue());
       if (isHistory) return;
-      // Formula inputs include created/edited timestamps and actors on the row.
-      const observed = evaluateFormula ? databaseRow : cells;
+      const observed = cells;
 
       observed?.observeDeep(observerEvent);
 
@@ -3950,10 +3869,14 @@ export const useFieldCellsByRowsSelector = (fieldId: string, rows?: Row[]) => {
         unobserverEvent();
       });
     };
-  }, [rows, rowMap, fieldId, field, fieldClock, evaluateFormula, isHistory]);
+  }, [rows, rowMap, fieldId, field, fieldClock, isFormula, isHistory]);
 
   return {
-    cells,
+    cells: isFormula ? (rows ? formula?.cells ?? null : null) : cells,
+    ready: Boolean(rows && (isFormula ? formula?.status === 'ready' : cells)),
+    formulaState: formula?.status,
+    formulaResults: formula?.results,
+    error: formula?.error,
   };
 };
 

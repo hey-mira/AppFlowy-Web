@@ -1,9 +1,11 @@
-import { useCallback, useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Row, useDatabaseView, useFieldCellsByRowsSelector, useReadOnly } from '@/application/database-yjs';
 import { CalculationType } from '@/application/database-yjs/database.type';
 import { useCalculateFieldDispatch, useClearCalculate, useUpdateCalculate } from '@/application/database-yjs/dispatch';
+import type { FormulaCellResult } from '@/application/database-yjs/fields/formula';
+import { nativeFormulaCalculationError } from '@/application/database-yjs/formula/native-column';
 import { YjsDatabaseKey } from '@/application/types';
 import { ReactComponent as DropdownIcon } from '@/assets/icons/alt_arrow_down.svg';
 import { CalculationCell, ICalculationCell } from '@/components/database/components/grid/grid-calculation-cell';
@@ -20,9 +22,18 @@ export interface GridCalculateRowCellProps {
 export function GridCalculateRowCell({ fieldId, rowOrders: rowOrdersProp }: GridCalculateRowCellProps) {
   const gridRowOrders = useContext(GridContext)?.rowOrders;
   const rowOrders = rowOrdersProp ?? gridRowOrders;
-  const { cells } = useFieldCellsByRowsSelector(fieldId, rowOrders);
+  const { cells, ready, formulaState, formulaResults, error } = useFieldCellsByRowsSelector(fieldId, rowOrders);
 
-  return <GridCalculateRowCellWithValues fieldId={fieldId} cells={cells} ready />;
+  return (
+    <GridCalculateRowCellWithValues
+      fieldId={fieldId}
+      cells={cells}
+      ready={ready}
+      evaluationState={formulaState}
+      formulaResults={formulaResults}
+      error={error}
+    />
+  );
 }
 
 export interface GridCalculateRowCellWithValuesProps {
@@ -30,15 +41,31 @@ export interface GridCalculateRowCellWithValuesProps {
   cells: Map<string, unknown> | null;
   /** Partial snapshots must not overwrite the persisted aggregate. */
   ready: boolean;
+  evaluationState?: 'pending' | 'ready' | 'error';
+  formulaResults?: ReadonlyMap<string, FormulaCellResult>;
+  error?: string;
 }
 
 /** Shared calculation controls for callers that load complete row snapshots. */
-export function GridCalculateRowCellWithValues({ fieldId, cells, ready }: GridCalculateRowCellWithValuesProps) {
+export function GridCalculateRowCellWithValues({
+  fieldId,
+  cells,
+  ready,
+  evaluationState,
+  formulaResults,
+  error,
+}: GridCalculateRowCellWithValuesProps) {
   const databaseView = useDatabaseView();
   const [calculation, setCalculation] = useState<ICalculationCell>();
   const readOnly = useReadOnly();
   const calculate = useCalculateFieldDispatch(fieldId);
   const calculations = databaseView?.get(YjsDatabaseKey.calculations);
+  const calculationError = useMemo(
+    () => nativeFormulaCalculationError(formulaResults, calculation?.type),
+    [formulaResults, calculation?.type]
+  );
+  const effectiveError = error ?? calculationError;
+  const effectiveState = effectiveError ? 'error' : evaluationState;
 
   const { t } = useTranslation();
   const handleObserver = useCallback(() => {
@@ -77,10 +104,10 @@ export function GridCalculateRowCellWithValues({ fieldId, cells, ready }: GridCa
   }, [calculations, fieldId, handleObserver]);
 
   useEffect(() => {
-    if (readOnly || !ready || !cells) return;
+    if (readOnly || !ready || !cells || effectiveError || (formulaResults && !calculation)) return;
 
     calculate(cells);
-  }, [cells, readOnly, ready, calculate, calculation?.type]);
+  }, [cells, readOnly, ready, calculate, calculation, effectiveError, formulaResults]);
 
   const [isHovered, setHovered] = useState(false);
 
@@ -104,12 +131,17 @@ export function GridCalculateRowCellWithValues({ fieldId, cells, ready }: GridCa
           setOpen(true);
         }}
         data-testid={`grid-calculate-cell-${fieldId}`}
+        data-evaluation-state={effectiveState}
         className={cn(
           !readOnly && 'hover:cursor-pointer hover:bg-fill-content-hover',
           'relative flex h-full w-full items-center justify-end'
         )}
       >
-        {!calculation && isHovered ? (
+        {effectiveState === 'error' ? (
+          <span role='alert' title={effectiveError}>
+            {t('grid.formula.error', { defaultValue: 'Error' })}
+          </span>
+        ) : !calculation && isHovered ? (
           <div className={'flex items-center gap-1.5 px-2 text-sm text-text-secondary'}>
             {t('grid.calculate')}
             <DropdownIcon className={'h-5 w-5'} />

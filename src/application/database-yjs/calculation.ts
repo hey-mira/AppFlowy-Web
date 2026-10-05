@@ -6,7 +6,21 @@ type CalculationInput = {
   fieldType: FieldType;
   calculationType: CalculationType;
   cellValues: Iterable<unknown>;
+  preserveNativeNumbers?: boolean;
 };
+
+/** These saved operations require Number values regardless of a formula's static type. */
+export function isNumericCalculation(type: CalculationType): boolean {
+  return [
+    CalculationType.Sum,
+    CalculationType.Average,
+    CalculationType.Median,
+    CalculationType.Min,
+    CalculationType.Max,
+    CalculationType.NumberRange,
+    CalculationType.NumberMode,
+  ].includes(type);
+}
 
 function countBy<T>(values: T[], iteratee: (value: T) => string | number): Record<string, number> {
   return values.reduce<Record<string, number>>((result, value) => {
@@ -22,14 +36,14 @@ export function calculateFieldValue({
   fieldType,
   calculationType,
   cellValues,
+  preserveNativeNumbers = false,
 }: CalculationInput): string | number | null {
   const values = Array.from(cellValues);
 
   const countEmptyResult = countBy(values, (data) => {
+    if (preserveNativeNumbers && typeof data === 'number') return CalculationType.CountNonEmpty;
     if (fieldType === FieldType.Checkbox) {
-      return getChecked(data as string | number | boolean)
-        ? CalculationType.CountNonEmpty
-        : CalculationType.CountEmpty;
+      return getChecked(data as string | number | boolean) ? CalculationType.CountNonEmpty : CalculationType.CountEmpty;
     }
 
     if (fieldType === FieldType.Checklist && typeof data === 'string') {
@@ -54,6 +68,38 @@ export function calculateFieldValue({
     return CalculationType.CountNonEmpty;
   });
 
+  // Decimal statistics cannot represent native IEEE-754 values. Keep them
+  // valid and preserve signed zero without changing ordinary Number columns.
+  const nativeNumbers = values.filter((value): value is number => typeof value === 'number');
+
+  if (preserveNativeNumbers && nativeNumbers.some((value) => !Number.isFinite(value) || Object.is(value, -0))) {
+    let result: number | undefined;
+
+    switch (calculationType) {
+      case CalculationType.Sum:
+        result = nativeNumbers.reduce((sum, value) => sum + value);
+        break;
+      case CalculationType.Average:
+        result = nativeNumbers.reduce((sum, value) => sum + value) / nativeNumbers.length;
+        break;
+      case CalculationType.Min:
+        result = nativeNumbers.reduce((minimum, value) => Math.min(minimum, value));
+        break;
+      case CalculationType.Max:
+        result = nativeNumbers.reduce((maximum, value) => Math.max(maximum, value));
+        break;
+      case CalculationType.Median: {
+        const sorted = [...nativeNumbers].sort((a, b) => a - b);
+        const middle = Math.floor(sorted.length / 2);
+
+        result = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+        break;
+      }
+    }
+
+    if (result !== undefined) return Object.is(result, -0) ? '-0' : String(result);
+  }
+
   const itemMap = (data: unknown) => {
     if (typeof data === 'number') {
       return data.toString();
@@ -66,7 +112,9 @@ export function calculateFieldValue({
     return null;
   };
 
-  const nums = values.map(itemMap).filter((item) => !!item) as string[];
+  const nums = values
+    .map(itemMap)
+    .filter((item) => !!item && (!preserveNativeNumbers || Number.isFinite(Number(item)))) as string[];
   const stats = new EnhancedBigStats(nums);
 
   switch (calculationType) {

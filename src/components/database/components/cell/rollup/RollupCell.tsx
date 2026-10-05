@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { RollupCell as RollupCellType, RollupListItem, CellProps } from '@/application/database-yjs/cell.type';
 import { useDatabaseContextOptional } from '@/application/database-yjs/context';
@@ -74,6 +75,7 @@ export function RollupCell({
   readOnly,
   isCardCell,
 }: CellProps<RollupCellType>) {
+  const { t } = useTranslation();
   const context = useDatabaseContextOptional();
   const databasePageId = context?.databasePageId;
   const navigateToRow = context?.navigateToRow;
@@ -108,7 +110,9 @@ export function RollupCell({
           : 'appflowy-hidden-scroller h-full w-full flex-nowrap overflow-x-auto overflow-y-hidden'
       )}
     >
-      {canVisualize && cell ? (
+      {cell?.error ? (
+        <span role={'alert'} title={cell.error}>{t('formula.error', { defaultValue: 'Error' })}</span>
+      ) : canVisualize && cell ? (
         <RollupVisualization cell={cell} value={value} />
       ) : cell &&
         [FieldType.Person, FieldType.CreatedBy, FieldType.LastEditedBy].includes(cell.targetFieldType!) &&

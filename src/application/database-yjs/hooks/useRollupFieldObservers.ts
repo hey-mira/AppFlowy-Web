@@ -12,16 +12,15 @@ import {
 } from '@/application/database-yjs/context';
 import { FieldType } from '@/application/database-yjs/database.type';
 import { parseRelationTypeOption, parseRollupTypeOption } from '@/application/database-yjs/fields';
-import { collectFormulaExternalReferences, readFormulaSchema } from '@/application/database-yjs/fields/formula';
 import { getEffectiveFiltersSnapshot } from '@/application/database-yjs/filter';
-import type { FormulaRowSources } from '@/application/database-yjs/formula/useFormulaRelationTitles';
+import type { FormulaRowSources } from '@/application/database-yjs/formula/native-column';
 import { isDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
 import { invalidateRelationCell } from '@/application/database-yjs/relation/cache';
 import { getRelationRowIdsFromCell } from '@/application/database-yjs/relation/cell';
 import { useDatabaseDependencyRestoreRevision } from '@/application/database-yjs/restore-dependencies';
+import { invalidateRollupCell } from '@/application/database-yjs/rollup/cache';
 import { observeRollupCell } from '@/application/database-yjs/rollup/observe';
 import { retainRollupSource } from '@/application/database-yjs/rollup/source-sync';
-import { invalidateRollupCell } from '@/application/database-yjs/rollup/cache';
 import { getRowKey } from '@/application/database-yjs/row_meta';
 import { subscribeSharedYjsDeep } from '@/application/database-yjs/shared-yjs-observer';
 import { YDatabase, YDatabaseRow, YDoc, YjsDatabaseKey, YjsEditorKey } from '@/application/types';
@@ -87,7 +86,6 @@ export function useRollupFieldObservers(
     // Find relation and rollup fields used in sorts/filters.
     const relationFieldIds = new Set<string>();
     const rollupFieldIds = new Set(additionalRollupFieldIds);
-    const schema = readFormulaSchema(fields);
 
     const addConditionField = (fieldId?: string) => {
       if (!fieldId) return;
@@ -99,13 +97,6 @@ export function useRollupFieldObservers(
 
       if (field && Number(field.get(YjsDatabaseKey.type)) === FieldType.Rollup) {
         rollupFieldIds.add(fieldId);
-      }
-
-      if (field && Number(field.get(YjsDatabaseKey.type)) === FieldType.Formula) {
-        const references = collectFormulaExternalReferences(field, schema);
-
-        references.relations.forEach((entry) => relationFieldIds.add(entry.id));
-        references.rollups.forEach((entry) => rollupFieldIds.add(entry.id));
       }
     };
 

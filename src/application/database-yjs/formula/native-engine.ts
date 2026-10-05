@@ -1,5 +1,3 @@
-import { createFormulaEngineClient } from '@notion-formula/sdk';
-
 import { YDoc } from '@/application/types';
 
 import type { FormulaEngineClient, FormulaSchema, PropertyDefinition } from '@notion-formula/sdk';
@@ -72,6 +70,8 @@ export function retainNativeFormulaEngine(doc: YDoc, contextKey = 'live'): Nativ
       const synchronize = async () => {
         if (released || current.closing) throw new Error('Formula database session is closed');
         if (!current.client) {
+          const { createFormulaEngineClient } = await import('@notion-formula/sdk');
+
           current.client = await createFormulaEngineClient(schema);
           current.definitions = new Map(
             schema.properties.map((property) => [propertyId(property), JSON.stringify(property)])

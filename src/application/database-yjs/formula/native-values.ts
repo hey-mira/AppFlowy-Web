@@ -1,5 +1,5 @@
 import { parseYDatabaseCellToCell } from '@/application/database-yjs/cell.parse';
-import { FormulaCell } from '@/application/database-yjs/cell.type';
+import { DateTimeCell, FormulaCell } from '@/application/database-yjs/cell.type';
 import { FieldType } from '@/application/database-yjs/database.type';
 import {
   formulaTypeOfField,
@@ -41,6 +41,18 @@ export type NativeFormulaOutcome =
       runtimeError?: RuntimeError;
       nativeErrors?: readonly RowError[];
     };
+
+const fieldStates = new WeakMap<YDatabaseField, PropertyState>();
+
+/** Static metadata is shared by mounted runtimes and computed host sessions. */
+export function getNativeFormulaPropertyState(field: YDatabaseField): PropertyState | undefined {
+  return fieldStates.get(field);
+}
+
+export function rememberNativeFormulaPropertyState(field: YDatabaseField, state?: PropertyState | null) {
+  if (state) fieldStates.set(field, state);
+  else fieldStates.delete(field);
+}
 
 export function nativeValueType(type: FormulaType): ValueType {
   if (typeof type === 'object') return { List: nativeValueType(type.list) };
@@ -112,9 +124,13 @@ function formulaValueToNative(value: FormulaValue): Value | null {
     case 'list':
       return { List: value.items.map(formulaValueToNative) };
     case 'date':
-      if (value.value.end !== undefined)
-        throw new Error('Date range inputs are not supported by the formula engine yet');
-      return { Date: BigInt(Math.trunc(value.value.start)) };
+      return {
+        DateValue: {
+          start: BigInt(Math.trunc(value.value.start)),
+          end: value.value.end === undefined ? null : BigInt(Math.trunc(value.value.end)),
+          include_time: value.value.includeTime,
+        },
+      };
   }
 }
 
@@ -147,11 +163,7 @@ export function readNativeInput(
     entry.type === FieldType.CreatedTime ||
     entry.type === FieldType.LastEditedTime
   ) {
-    const parsed = cell ? parseYDatabaseCellToCell(cell, entry.field) : undefined;
-
-    if (entry.type === FieldType.DateTime && parsed && 'isRange' in parsed && parsed.isRange) {
-      throw new Error('Date range inputs are not supported by the formula engine yet');
-    }
+    const parsed = cell ? (parseYDatabaseCellToCell(cell, entry.field) as DateTimeCell) : undefined;
 
     const raw =
       entry.type === FieldType.CreatedTime
@@ -161,7 +173,16 @@ export function readNativeInput(
         : parsed?.data;
     const ms = timestampMilliseconds(raw);
 
-    return ms === null ? null : { Date: ms };
+    return ms === null
+      ? null
+      : {
+          DateValue: {
+            start: ms,
+            end:
+              entry.type === FieldType.DateTime && parsed?.isRange ? timestampMilliseconds(parsed.endTimestamp) : null,
+            include_time: entry.type === FieldType.DateTime ? Boolean(parsed?.includeTime) : true,
+          },
+        };
   }
 
   return formulaValueToNative(readFieldFormulaValue(entry, row, context));
@@ -181,7 +202,16 @@ export function nativeInputColumn(type: ValueType, values: Array<Value | null>):
         Boolean: { validity, values: values.map((value) => (value && 'Boolean' in value ? value.Boolean : false)) },
       };
     case 'Date':
-      return { Date: { validity, values: values.map((value) => (value && 'Date' in value ? value.Date : BigInt(0))) } };
+      return {
+        DateValue: {
+          validity,
+          values: values.map((value) =>
+            value && 'DateValue' in value
+              ? value.DateValue
+              : { start: value && 'Date' in value ? value.Date : BigInt(0), end: null, include_time: true }
+          ),
+        },
+      };
     default:
       return typeof type === 'object' && 'List' in type
         ? { List: { validity, values: values.map((value) => (value && 'List' in value ? value.List : [])) } }
@@ -222,6 +252,10 @@ export function nativeOutputOutcome(output: FormulaOutput, index: number): Nativ
     return column.Date.validity[index]
       ? { status: 'value', resultType, value: { Date: column.Date.values[index] } }
       : { status: 'null', resultType };
+  if ('DateValue' in column)
+    return column.DateValue.validity[index]
+      ? { status: 'value', resultType, value: { DateValue: column.DateValue.values[index] } }
+      : { status: 'null', resultType };
   if ('List' in column)
     return column.List.validity[index]
       ? { status: 'value', resultType, value: { List: column.List.values[index] } }
@@ -242,13 +276,19 @@ function nativeValueToFormula(value: Value | null): FormulaValue {
   if ('String' in value) return { type: 'text', value: value.String };
   if ('Boolean' in value) return { type: 'boolean', value: value.Boolean };
   if ('List' in value) return { type: 'list', items: value.List.map(nativeValueToFormula) };
-  const ms = Number(value.Date);
+  const date = 'DateValue' in value ? value.DateValue : { start: value.Date, end: null, include_time: true };
+  const ms = Number(date.start);
+  const end = date.end === null ? undefined : Number(date.end);
 
-  if (!Number.isSafeInteger(ms) || Number.isNaN(new Date(ms).getTime())) {
+  if (
+    !Number.isSafeInteger(ms) ||
+    Number.isNaN(new Date(ms).getTime()) ||
+    (end !== undefined && (!Number.isSafeInteger(end) || Number.isNaN(new Date(end).getTime())))
+  ) {
     throw new Error('Formula date is outside AppFlowy’s supported display range');
   }
 
-  return { type: 'date', value: { start: ms, includeTime: true } };
+  return { type: 'date', value: { start: ms, end, includeTime: date.include_time } };
 }
 
 export function projectNativeFormulaResult(
@@ -270,7 +310,11 @@ export function projectNativeFormulaResult(
     if (value.type === 'number') result.rawNumeric = value.value;
     if (value.type === 'boolean') result.rawBoolean = value.value;
     if (value.type === 'date')
-      result.rawDate = { start: Math.floor(value.value.start / 1000), includeTime: value.value.includeTime };
+      result.rawDate = {
+        start: value.value.start / 1000,
+        end: value.value.end === undefined ? undefined : value.value.end / 1000,
+        includeTime: value.value.includeTime,
+      };
     return {
       ...result,
       evaluationState: outcome.status,
@@ -293,7 +337,8 @@ export function projectNativeFormulaResult(
 
 /** Non-finite native numbers remain values, including inside mixed date lists. */
 export function formatNativeFormulaValue(value: FormulaValue, options: FormulaFormatOptions = {}): string {
-  if (value.type === 'number' && !Number.isFinite(value.value)) return String(value.value);
+  if (value.type === 'number' && (!Number.isFinite(value.value) || Object.is(value.value, -0)))
+    return Object.is(value.value, -0) ? '-0' : String(value.value);
   if (value.type === 'list') return value.items.map((item) => formatNativeFormulaValue(item, options)).join(', ');
   return formatFormulaValue(value, options);
 }
