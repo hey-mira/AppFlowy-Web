@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "provenance": {
+    "revision": "4fdb4f4",
+    "dataset": "src/application/database-yjs/fields/formula/__tests__/value-combination-dataset.json",
+    "sha256": "f7ddf7bf6560da75d5cc7ef5700c921efa122b829ee5fab6f1b1c8dcca4e5702",
+    "campaign": "playwright/fixtures/researched-scenarios.json#campaign-open-rate",
+    "harnessFiles": [
+      "value-combination-fixture.ts",
+      "value-combinations.test.ts",
+      "value-combination-operators.test.ts",
+      "campaign-formula-rollup-values.test.ts",
+      "value-combinations.md"
+    ],
+    "harnessDirectory": "src/application/database-yjs/fields/formula/__tests__"
+  },
+  "coverage": {
+    "contracts": 26,
+    "fieldTypes": 20,
+    "statesPerPhase": 187,
+    "phases": [
+      "source",
+      "restored"
+    ],
+    "campaignSubsetsPerPhase": 16,
+    "formulaReferences": 2,
+    "probe": [
+      "raw",
+      "downstream",
+      "predicate",
+      "normalized",
+      "empty",
+      "guarded-branch"
+    ]
+  },
+  "decisions": {
+    "null-comparison": "Native Number comparisons propagate ordinary null; they do not replace it with false. Guarded date predicates and empty() retain their authored results.",
+    "negative-zero": "The native Number DTO and host projection preserve the stored negative-zero sign. format(-0) still returns the authored string \"0\".",
+    "malformed-number": "The Number host adapter passes Number(\"not-a-number\") as NaN. Native NaN remains a Number through Formula chains, formats as \"NaN\", and is not empty; its greater-than-zero predicate is false.",
+    "canonical-references": "Stored fixture formulas name canonical field IDs. Legacy Amount/Title/Checked/Sent/Opened/Average rate display-name references are encoded as their known IDs when the fixture is authored.",
+    "retired-matrix": "The former millions of typed-rejection, truthiness and pair/triple coercion assertions belong to the retired JavaScript language. Every authored persisted value and Campaign subset is retained through native evaluation and Yjs reload."
+  },
+  "overrides": [
+    {
+      "state": "number/missing",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "number/blank",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "checklist/missing",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "time/missing",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "time/blank",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "rollup-number/missing",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "rollup-number/no-links",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "rollup-number/blank-target",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "rollup-percent/missing",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "rollup-percent/no-links",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "formula-number/missing",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "formula-number/blank",
+      "predicate": null,
+      "decision": "null-comparison"
+    },
+    {
+      "state": "number/negative-zero",
+      "rawNumber": "-0",
+      "decision": "negative-zero"
+    },
+    {
+      "state": "formula-number/negative-zero",
+      "rawNumber": "-0",
+      "decision": "negative-zero"
+    },
+    {
+      "state": "number/malformed",
+      "rawNumber": "NaN",
+      "normalized": "NaN",
+      "empty": false,
+      "decision": "malformed-number"
+    },
+    {
+      "state": "formula-number/malformed",
+      "rawNumber": "NaN",
+      "normalized": "NaN",
+      "empty": false,
+      "decision": "malformed-number"
+    }
+  ],
+  "browserTest": "playwright/e2e/integrations/native-formula-values.spec.ts"
+}
