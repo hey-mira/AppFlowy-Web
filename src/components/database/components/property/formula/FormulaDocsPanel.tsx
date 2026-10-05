@@ -2,58 +2,24 @@ import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { FieldType } from '@/application/database-yjs/database.type';
-import {
-  FormulaBuiltinSpec,
-  FormulaFieldSchema,
-  FormulaFunctionExample,
-  FormulaFunctionSpec,
-  formulaPropertyReference,
-  formulaTypeOfField,
-  resolveFormulaField,
-  typeToString,
-} from '@/application/database-yjs/fields/formula';
+import { FormulaFieldSchema, formulaTypeOfField, typeToString } from '@/application/database-yjs/fields/formula';
 import { FieldTypeIcon } from '@/components/database/components/field/FieldTypeIcon';
 import { cn } from '@/lib/utils';
 
-import { findPropReferences } from './formula-slate';
-import { FormulaPropChip } from './FormulaPropChip';
-import { HIGHLIGHT_CLASS, highlightFormula } from './highlight';
+import { FormulaBuiltinSpec, FormulaFunctionExample, FormulaFunctionSpec } from './formula-docs';
 
 export type FormulaDocsItem =
   | { kind: 'function'; spec: FormulaFunctionSpec }
   | { kind: 'property'; entry: FormulaFieldSchema }
   | { kind: 'builtin'; spec: FormulaBuiltinSpec };
 
-/** A formula drawn as in the editor: property references as chips, the rest highlighted. */
-function Snippet({ source, schema }: { source: string; schema: FormulaFieldSchema[] }) {
-  return (
-    <code className={'whitespace-pre-wrap break-words font-mono text-xs leading-6'}>
-      {highlightFormula(source).map((segment, index) => {
-        const reference = segment.kind === 'prop' ? findPropReferences(segment.text)[0]?.ref : undefined;
-
-        if (reference !== undefined) {
-          return (
-            <FormulaPropChip
-              key={index}
-              entry={resolveFormulaField(schema, reference)}
-              reference={reference}
-              className={'first:ml-0'}
-            />
-          );
-        }
-
-        return (
-          <span key={index} className={HIGHLIGHT_CLASS[segment.kind]} data-highlight={segment.kind}>
-            {segment.text}
-          </span>
-        );
-      })}
-    </code>
-  );
+/** Host examples remain plain text; native Draft analysis owns editor tokens. */
+function Snippet({ source }: { source: string }) {
+  return <code className={'whitespace-pre-wrap break-words font-mono text-xs leading-6'}>{source}</code>;
 }
 
-function propertyExamples(entry: FormulaFieldSchema, schema: FormulaFieldSchema[]): FormulaFunctionExample[] {
-  const ref = formulaPropertyReference(entry.id, schema);
+function propertyExamples(entry: FormulaFieldSchema, _schema: FormulaFieldSchema[]): FormulaFunctionExample[] {
+  const ref = `prop(${JSON.stringify(entry.id)})`;
   const type = entry.type === FieldType.Formula ? undefined : formulaTypeOfField(entry);
 
   if (entry.type === FieldType.Checklist) {
@@ -143,7 +109,7 @@ function FormulaDocsPanelContent({
           <span className={'truncate'}>{item.entry.name}</span>
         </span>
       );
-      signature = formulaPropertyReference(item.entry.id, schema);
+      signature = `prop(${JSON.stringify(item.entry.name)})`;
       description = t('grid.formula.propertyDescription', {
         defaultValue: 'Property of type {{type}}.',
         type,
@@ -156,7 +122,10 @@ function FormulaDocsPanelContent({
   }
 
   return (
-    <div className={'flex min-h-0 flex-col gap-2 overflow-y-auto overscroll-contain text-sm'} data-testid={'formula-docs'}>
+    <div
+      className={'flex min-h-0 flex-col gap-2 overflow-y-auto overscroll-contain text-sm'}
+      data-testid={'formula-docs'}
+    >
       <div className={'text-base font-medium text-text-primary'}>{title}</div>
       <div className={'font-mono text-xs text-text-secondary'}>{signature}</div>
       <p className={'text-text-secondary'}>{description}</p>
@@ -165,7 +134,7 @@ function FormulaDocsPanelContent({
           <button
             key={example.expression}
             type={'button'}
-            // Property references render as chips, so the source is exposed for tests.
+            // Exact source is exposed for clipboard and insertion verification.
             data-expression={example.expression}
             title={t('grid.formula.insertExample', { defaultValue: 'Insert this example' })}
             className={cn(
@@ -173,7 +142,7 @@ function FormulaDocsPanelContent({
             )}
             onClick={() => onInsert(example.expression)}
           >
-            <Snippet source={example.expression} schema={schema} />
+            <Snippet source={example.expression} />
             <span className={'font-mono text-xs text-text-tertiary'}>= {example.result}</span>
           </button>
         ))}

@@ -25,37 +25,36 @@ import {
   withReact,
 } from 'slate-react';
 
-import {
-  FormulaFieldSchema,
-  resolveFormulaField,
-  toDisplayExpression,
-  toStorageExpression,
-} from '@/application/database-yjs/fields/formula';
+import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/schema';
 import { cn } from '@/lib/utils';
 
-import { formulaBoundVariables, formulaPasteContext, normalizePastedFormula } from './formula-paste';
 import {
+  applySourceEdits,
   editorSource,
   ejectCaretFromToken,
   FormulaPropElement,
   isFormulaProp,
   moveCaret,
   offsetToPoint,
-  rebindTextCalls,
-  rebindTokens,
   remapOffset,
   replaceSourceRange,
   resetSource,
   selectionOffsets,
   sourceToNodes,
+  synchronizeFormulaTokens,
   textOffsets,
   tokenRangeAt,
+  withFormulaHistoryBatch,
   withFormulaTokens,
 } from './formula-slate';
 import { FormulaPropChip } from './FormulaPropChip';
 import { HIGHLIGHT_CLASS, HighlightKind, highlightFormula } from './highlight';
 
+import type { NativeDraftState } from './native-editor';
+import type { TextEdit } from '@notion-formula/sdk';
+
 export interface FormulaSourceInputHandle {
+  applyEdits: (edits: TextEdit[], cursor: number, merge?: boolean) => void;
   /** Replaces `[start, end)` of the formula and puts the caret `caretOffset` into the new text. */
   replaceRange: (start: number, end: number, text: string, caretOffset: number) => void;
   /** Inserts at the selection (replacing it); `caretOffset` is relative to the insertion. */
@@ -65,25 +64,21 @@ export interface FormulaSourceInputHandle {
 }
 
 /**
- * Why the source changed: the user edited it, or its tokens were rewritten
- * for properties a collaborator renamed or deleted.
+ * Why the source changed: a user edit, or a native-span name-to-ID binding
+ * merged into that edit's undo history.
  */
 export type FormulaSourceChange = 'edit' | 'rebind';
 
 interface FormulaSourceInputProps {
-  /** Formula source in display form. */
+  /** Canonical formula source; chips display names without rewriting this text. */
   value: string;
   onChange: (value: string, change: FormulaSourceChange) => void;
   /** Collapsed caret (or selection focus) as an offset into the source. */
   onCaretChange: (caret: number) => void;
   onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   schema: FormulaFieldSchema[];
-  /**
-   * The database the properties belong to. Tokens copied here paste back as
-   * the properties they showed, even after one is renamed or its name reused;
-   * elsewhere they paste by name.
-   */
-  clipboardScope?: string;
+  nativeState?: NativeDraftState;
+  readOnly?: boolean;
   placeholder?: string;
   ariaLabel?: string;
   className?: string;
@@ -114,7 +109,7 @@ function renderPlaceholder({ attributes, children }: RenderPlaceholderProps) {
  */
 export const FormulaSourceInput = memo(
   forwardRef<FormulaSourceInputHandle, FormulaSourceInputProps>(function FormulaSourceInput(
-    { value, onChange, onCaretChange, onKeyDown, schema, clipboardScope, placeholder, ariaLabel, className },
+    { value, onChange, onCaretChange, onKeyDown, schema, nativeState, readOnly, placeholder, ariaLabel, className },
     ref
   ) {
     // The host recreates its handlers on most renders; reading them through a
@@ -125,108 +120,27 @@ export const FormulaSourceInput = memo(
       handlersRef.current = { onChange, onCaretChange, onKeyDown };
     });
 
-    // Pasted text is read against the current properties, which change while the editor is open.
-    const schemaRef = useRef(schema);
-    const clipboardScopeRef = useRef(clipboardScope);
-
-    useLayoutEffect(() => {
-      schemaRef.current = schema;
-      clipboardScopeRef.current = clipboardScope;
-    });
-    // The properties the document's tokens, and those in its undo history, name.
-    const boundSchemaRef = useRef(schema);
-    const [editor] = useState(() =>
-      withFormulaTokens(
-        withReact(withHistory(createEditor())),
-        (text, { before, after }) =>
-          normalizePastedFormula(
-            text,
-            schemaRef.current.map((entry) => entry.name),
-            {
-              // Pasted into a string or a comment, the text stays as it is;
-              // in code, the character before it can change how it reads.
-              context: formulaPasteContext(before),
-              // Variables a let() around the paste binds are not properties.
-              reservedWords: formulaBoundVariables(before + text + after),
-            }
-          ),
-        {
-          scope: () => clipboardScopeRef.current,
-          // A copied token keeps its property's id and pastes named for the
-          // properties as they are then, like the tokens rebound below.
-          bind: (source) => toStorageExpression(source, boundSchemaRef.current),
-          unbind: (bound) => toDisplayExpression(bound, boundSchemaRef.current),
-        }
-      )
-    );
+    const [editor] = useState(() => withFormulaTokens(withReact(withHistory(createEditor()))));
     const [initialValue] = useState<Descendant[]>(() => sourceToNodes(value));
     // The source the document currently serializes to; a different `value`
     // prop means the formula was replaced from outside.
     const sourceRef = useRef(value);
     const [children, setChildren] = useState(initialValue);
 
-    // Update the document before paint, so the new source's highlighting is
-    // never drawn over the old document.
+    // Context/schema refreshes leave the same canonical document and history.
     useLayoutEffect(() => {
-      const boundSchema = boundSchemaRef.current;
-      let rebind: ((source: string) => string) | null = null;
-      let rebound = false;
-      // The draft as the host rewrites it for the current properties.
-      let hostRebound = sourceRef.current;
+      if (value !== sourceRef.current) {
+        const current = editorSource(editor);
+        const caret = selectionOffsets(editor)?.end;
 
-      if (schema !== boundSchema) {
-        boundSchemaRef.current = schema;
-        // Renamed or deleted properties: rewrite the tokens in place, the way
-        // the host rewrites the draft, so the caret and an IME composition
-        // stay put. History is rewritten too, so undo restores the property an
-        // edit read. Names resolve against the properties they were written
-        // for, before a rename or deletion let another property take them.
-        rebind = (source: string) => toDisplayExpression(toStorageExpression(source, boundSchema), schema);
-        rebound = rebindTokens(editor, rebind);
-        hostRebound = rebind(sourceRef.current);
-      }
-
-      if (value === sourceRef.current && !rebound) return;
-      const current = editorSource(editor);
-      const caret = selectionOffsets(editor)?.end;
-
-      // The host reads references off the draft's text, which stops reading a
-      // token as one after a string or comment the user has not closed yet;
-      // then its rewrite leaves that token naming what may now be another
-      // property. The tokens are what the user sees: keep their rewrite, with
-      // its history, and hand it to the host.
-      if (rebind && rebound && value === hostRebound && value !== current) {
-        // The host's rewrite also covers calls the editor keeps as text, e.g.
-        // one split over lines; those follow the host.
-        const merged = rebindTextCalls(editor, rebind);
-
-        if (merged === current) {
-          sourceRef.current = current;
-          setChildren(editor.children);
-          handlersRef.current.onChange(current, 'rebind');
-          return;
-        }
-
-        // Both kinds changed: start over from the tokens' rewrite with the
-        // host's rewrite of the text calls.
-        if (merged !== value) {
-          resetSource(editor, merged, caret === undefined ? undefined : remapOffset(current, merged, caret));
-          sourceRef.current = merged;
-          setChildren(editor.children);
-          handlersRef.current.onChange(merged, 'rebind');
-          return;
-        }
-      }
-
-      // Anything else replaced the formula: start over, keeping the caret in
-      // the text around the change.
-      if (value !== current) {
         resetSource(editor, value, caret === undefined ? undefined : remapOffset(current, value, caret));
+        sourceRef.current = value;
       }
 
-      sourceRef.current = value;
+      if (nativeState?.definition.expression === value)
+        synchronizeFormulaTokens(editor, nativeState.property_references);
       setChildren(editor.children);
-    }, [editor, schema, value]);
+    }, [editor, nativeState, value]);
 
     const focusAt = useCallback(
       (offset: number) => {
@@ -251,6 +165,15 @@ export const FormulaSourceInput = memo(
     useImperativeHandle(
       ref,
       () => ({
+        applyEdits: (edits, cursor, merge = false) => {
+          applySourceEdits(editor, edits, cursor, merge);
+          const next = editorSource(editor);
+
+          sourceRef.current = next;
+          setChildren(editor.children);
+          handlersRef.current.onChange(next, merge ? 'rebind' : 'edit');
+          handlersRef.current.onCaretChange(cursor);
+        },
         replaceRange: (start, end, text, caretOffset) => {
           ReactEditor.focus(editor);
           replaceSourceRange(editor, start, end, text, caretOffset);
@@ -294,7 +217,10 @@ export const FormulaSourceInput = memo(
     );
 
     // Syntax colours come from the whole source, then are cut to each text node.
-    const segments = useMemo(() => highlightFormula(value), [value]);
+    const segments = useMemo(
+      () => highlightFormula(value, nativeState?.definition.expression === value ? nativeState.tokens : []),
+      [value, nativeState]
+    );
     const offsets = useMemo(() => textOffsets(children), [children]);
     const decorate = useCallback(
       ([node, path]: NodeEntry): HighlightRange[] => {
@@ -391,7 +317,10 @@ export const FormulaSourceInput = memo(
 
         Transforms.select(editor, dragged);
         ReactEditor.setFragmentData(editor, event.dataTransfer, 'drag');
-        tokenDragRef.current = { text: event.dataTransfer.getData('text/plain'), range: Editor.rangeRef(editor, dragged) };
+        tokenDragRef.current = {
+          text: event.dataTransfer.getData('text/plain'),
+          range: Editor.rangeRef(editor, dragged),
+        };
         return true;
       },
       [editor, endTokenDrag]
@@ -414,12 +343,14 @@ export const FormulaSourceInput = memo(
           return true;
         }
 
-        Transforms.select(editor, at);
-        if (dragged && !Range.equals(dragged, at) && !Editor.void(editor, { at, voids: true })) {
-          Transforms.delete(editor, { at: dragged });
-        }
+        withFormulaHistoryBatch(editor, () => {
+          Transforms.select(editor, at);
+          if (dragged && !Range.equals(dragged, at) && !Editor.void(editor, { at, voids: true })) {
+            Transforms.delete(editor, { at: dragged });
+          }
 
-        ReactEditor.insertData(editor, event.dataTransfer);
+          ReactEditor.insertData(editor, event.dataTransfer);
+        });
         if (!ReactEditor.isFocused(editor)) ReactEditor.focus(editor);
         return true;
       },
@@ -444,6 +375,8 @@ export const FormulaSourceInput = memo(
           role={'textbox'}
           aria-multiline
           aria-label={ariaLabel}
+          aria-readonly={readOnly}
+          readOnly={readOnly}
           spellCheck={false}
           autoCorrect={'off'}
           autoCapitalize={'off'}
@@ -485,7 +418,7 @@ function FormulaPropToken({
   schema,
 }: RenderElementProps & { schema: FormulaFieldSchema[] }) {
   const token = element as unknown as FormulaPropElement;
-  const entry = resolveFormulaField(schema, token.ref);
+  const entry = schema.find((entry) => entry.id === token.ref);
   const selected = useSelected();
   const focused = useFocused();
 

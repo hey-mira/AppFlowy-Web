@@ -1,0 +1,474 @@
+import { writeFile } from 'node:fs/promises';
+
+import { expect } from '@playwright/test';
+
+import { test } from '../../support/native-formula-editor-server';
+
+import type { Locator, Page } from '@playwright/test';
+
+test.use({ timezoneId: 'Asia/Singapore' });
+
+type Evidence = {
+  workers: number;
+  terminated: number;
+  held: boolean;
+  requests: Array<{ worker: number; method: string; args: unknown[] }>;
+  observed: Array<{ source: string; preview: string; diagnostics: string }>;
+};
+
+const evidence = (page: Page) => page.evaluate(() => (window as unknown as { editorEvidence: Evidence }).editorEvidence);
+
+async function replaceSource(input: Locator, source: string) {
+  await expect(input).toBeEditable();
+  await expect(input).toHaveAttribute('contenteditable', 'true');
+  await input.click();
+  await input.press('ControlOrMeta+a');
+  await input.press('Backspace');
+  await input.pressSequentially(source, { delay: 0 });
+}
+
+async function pasteSource(input: Locator, source: string) {
+  await input.evaluate((element, text) => {
+    const data = new DataTransfer();
+
+    data.setData('text/plain', text);
+    element.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+  }, source);
+}
+
+async function copySelection(input: Locator) {
+  return input.evaluate((element) => {
+    const data = new DataTransfer();
+
+    element.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }));
+    return data.getData('text/plain');
+  });
+}
+
+test.beforeEach(async ({ page, formulaURL, formulaHTML }) => {
+  await page.route('**/native-formula-editor-fixture*', (route) =>
+    route.fulfill({ contentType: 'text/html', body: formulaHTML })
+  );
+  await page.goto(new URL('/native-formula-editor-fixture', formulaURL).href);
+  await expect(page.getByTestId('committed-total')).toHaveText('25');
+  await expect(page.getByTestId('formula-editor-input')).toBeVisible();
+  await expect(page.getByTestId('formula-editor-input')).toBeEditable();
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  const artifact = {
+    scenario: testInfo.title,
+    status: testInfo.status,
+    profile: process.env.FORMULA_FIXTURE_PRODUCTION === '1' ? 'production' : 'development',
+    browser: await page.evaluate(() => navigator.userAgent),
+    timezone: 'Asia/Singapore',
+    saved: await page
+      .getByTestId('saved-expression')
+      .textContent({ timeout: 1000 })
+      .catch(() => null),
+    evidence: await evidence(page),
+  };
+  const json = testInfo.outputPath('native-formula-editor-evidence.json');
+  const screenshot = testInfo.outputPath('native-formula-editor.png');
+
+  await writeFile(
+    json,
+    JSON.stringify(artifact, (_key, value: unknown) => (typeof value === 'bigint' ? String(value) : value), 2)
+  );
+  await page.screenshot({ path: screenshot });
+  await testInfo.attach('native-formula-editor-evidence.json', { path: json, contentType: 'application/json' });
+  await testInfo.attach('native-formula-editor.png', { path: screenshot, contentType: 'image/png' });
+});
+
+// Failure modes at the browser seam: a JS checker/completer/evaluator still
+// runs; editing blocks the committed Engine; formulas disappear from property
+// completion; saving stores names; cancellation writes Yjs; one-row runtime
+// errors prohibit a statically valid save; a Worker is created on each edit.
+test('Draft completion and candidate preview remain isolated from saved formulas', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+  const saved = page.getByTestId('saved-expression');
+
+  await expect
+    .poll(async () => (await evidence(page)).requests.some((request) => request.method === 'draft.getState'))
+    .toBe(true);
+  await replaceSource(input, 'sub');
+  await expect(page.getByTestId('formula-suggestion-Subtotal')).toBeVisible();
+  await page.getByTestId('formula-suggestion-Subtotal').click();
+  await expect(input).toHaveAttribute('data-value', 'prop("subtotal")');
+  await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', 'subtotal');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
+  await expect(saved).toHaveText('prop("subtotal") + 5');
+  await page.getByRole('button', { name: 'Set Price to 15', exact: true }).click();
+  await expect(page.getByTestId('committed-total')).toHaveText('35');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('30');
+  await page.getByTestId('formula-editor-cancel').click();
+  await expect(saved).toHaveText('prop("subtotal") + 5');
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await replaceSource(input, 'test("x", "[")');
+  await expect(page.getByTestId('formula-editor-error')).toContainText('InvalidRegex');
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await page.getByTestId('formula-editor-done').click();
+  await expect(saved).toHaveText('test("x", "[")');
+  await expect(page.getByTestId('formula-editor')).toHaveCount(0);
+  const requests = (await evidence(page)).requests;
+  const committedWorkers = new Set(
+    requests.filter((request) => request.method === 'engine.getProperties').map((request) => request.worker)
+  );
+  const previews = requests
+    .filter((request) => request.method === 'engine.evaluate' && !committedWorkers.has(request.worker))
+    .map((request) => request.args[0]) as Array<{
+    row_ids: string[];
+    runtime: { time_zone: string; now: string };
+  }>;
+
+  expect(previews.every((request) => request.row_ids.length === 1)).toBe(true);
+  expect(previews.every((request) => request.runtime.time_zone === '+08:00')).toBe(true);
+  expect((await evidence(page)).workers).toBeLessThanOrEqual(5);
+});
+
+// Native coordinates are UTF-16, including text before the cursor. Formatting
+// and quick fixes must use version-bound native edits, preserve the result's
+// cursor, and enter Slate history as one operation that undo/redo can restore.
+test('Chinese and emoji survive native help, formatting, fixes and undo', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'if(true,"你好😀","no")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('你好😀');
+  await page.getByTestId('formula-editor-format').click();
+  await expect(input).toHaveAttribute('data-value', 'if(true, "你好😀", "no")\n');
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', 'if(true,"你好😀","no")');
+  await input.press('ControlOrMeta+Shift+z');
+  await expect(input).toHaveAttribute('data-value', 'if(true, "你好😀", "no")\n');
+  await replaceSource(input, 'if(true, "你好😀", "no"');
+  await expect(page.getByTestId('formula-signature-help')).toContainText('if');
+  await expect(page.getByTestId('formula-editor-quick-fix').first()).toBeVisible();
+  await page.getByTestId('formula-editor-quick-fix').first().click();
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('你好😀');
+  const helpRequests = (await evidence(page)).requests.filter((request) => request.method === 'draft.help');
+
+  expect(helpRequests.some((request) => request.args[1] === 'if(true, "你好😀", "no"'.length)).toBe(true);
+});
+
+// A property's displayed name is not its binding. Typed/pasted prop("Label")
+// binds against the edit's schema before a rename/name reuse; canonical copied
+// source stays bound, and asynchronous tokenization cannot erase undo history.
+test('renames, name reuse and pasted references keep IDs through undo and redo', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("Price") * 2');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
+  await input.press('End');
+  await pasteSource(input, ' + 1');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2 + 1');
+  await page.getByRole('button', { name: 'Rename and reuse Price', exact: true }).click();
+  await expect(page.getByTestId('formula-token')).toHaveText('金额💰');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2 + 1');
+  await input.click();
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2');
+  await input.press('ControlOrMeta+Shift+z');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2 + 1');
+  await pasteSource(input, ' + prop("price")');
+  await expect(page.getByTestId('formula-token')).toHaveCount(2);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('31');
+  await page.getByRole('button', { name: 'Remove Price', exact: true }).click();
+  await expect(page.getByTestId('formula-token').first()).toHaveAttribute('data-missing', 'true');
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+});
+
+// Holding actual Worker replies exposes three separate revisions: a bigint
+// Draft version, local edit/caret changes, and collaborative schema changes.
+// Old help, edits and preview results must never overwrite current local text.
+test('held native help and preview replies cannot overwrite newer edits', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await page.getByRole('button', { name: 'Hold next help', exact: true }).click();
+  await replaceSource(input, 'rou');
+  await expect.poll(async () => (await evidence(page)).held).toBe(true);
+  await replaceSource(input, '42');
+  await page.getByRole('button', { name: 'Release reply', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('42');
+  await expect(input).toHaveAttribute('data-value', '42');
+  await expect(page.getByTestId('formula-suggestion-round()')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Hold next preview', exact: true }).click();
+  await replaceSource(input, '43');
+  await expect.poll(async () => (await evidence(page)).held).toBe(true);
+  const observedBefore = (await evidence(page)).observed.length;
+
+  await replaceSource(input, '44');
+  await page.getByRole('button', { name: 'Release reply', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('44');
+  expect((await evidence(page)).observed.slice(observedBefore).map((entry) => entry.preview)).not.toContain('43');
+  await expect(input).toHaveAttribute('data-value', '44');
+  await page.getByRole('button', { name: 'Hold next format', exact: true }).click();
+  await page.getByTestId('formula-editor-format').click();
+  await expect.poll(async () => (await evidence(page)).held).toBe(true);
+  await replaceSource(input, '45');
+  await page.getByRole('button', { name: 'Release reply', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('45');
+  await expect(input).toHaveAttribute('data-value', '45');
+});
+
+test('a schema change during save forces fresh native validation', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("price") * 2');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
+  await page.getByRole('button', { name: 'Hold next save', exact: true }).click();
+  await page.getByTestId('formula-editor-done').click();
+  await expect.poll(async () => (await evidence(page)).held).toBe(true);
+  await page.getByRole('button', { name: 'Remove Price', exact: true }).click();
+  await page.getByRole('button', { name: 'Release reply', exact: true }).click();
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2');
+});
+
+test('canonical copied chips remain bound when a display name is reused', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("Price")');
+  await expect(input).toHaveAttribute('data-value', 'prop("price")');
+  await expect(page.getByTestId('formula-token')).toHaveCount(1);
+  await input.press('ControlOrMeta+a');
+  const copied = await input.evaluate((element) => {
+    const data = new DataTransfer();
+
+    element.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }));
+    Object.assign(window, { copiedFormula: data });
+    return data.getData('text/plain');
+  });
+
+  expect(copied).toBe('prop("price")');
+  await page.getByRole('button', { name: 'Rename and reuse Price', exact: true }).click();
+  await input.click();
+  await input.press('End');
+  await pasteSource(input, ' + ');
+  await input.evaluate((element) =>
+    element.dispatchEvent(
+      new ClipboardEvent('paste', {
+        clipboardData: (window as unknown as { copiedFormula: DataTransfer }).copiedFormula,
+        bubbles: true,
+        cancelable: true,
+      })
+    )
+  );
+  await expect(input).toHaveAttribute('data-value', 'prop("price") + prop("price")');
+  await expect(page.getByTestId('formula-token')).toHaveCount(2);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("price") + prop("price")');
+});
+
+// Current host behavior uses the latest local save for formula text only.
+// Concurrent remote text must not erase local edits/history; remote format
+// options survive, and a deleted/retyped target cannot be written as Formula.
+test('save revalidates current fields and preserves the local-save policy', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("subtotal") + 7');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('27');
+  await page.getByRole('button', { name: 'Remote formula and format', exact: true }).click();
+  await expect(input).toHaveAttribute('data-value', 'prop("subtotal") + 7');
+  await expect(page.getByTestId('saved-expression')).toHaveText('100');
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 7');
+  await expect(page.getByTestId('saved-format')).toHaveText('2');
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await replaceSource(input, 'prop("price") * 2');
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await page.getByRole('button', { name: 'Retype Price as text', exact: true }).click();
+  await expect(page.getByTestId('formula-editor-error')).toContainText('InvalidValueType');
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 2');
+  await replaceSource(input, '10');
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await page.getByRole('button', { name: 'Retype Total as text', exact: true }).click();
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+});
+
+// A historical context owns an independent Engine and immutable row snapshot.
+// Switching context must dispose old editor/preview Workers without remounting
+// Slate, preserve local edits/history, and never let Done write history Yjs.
+test('historical preview remains isolated and editor Workers close on cancel', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await replaceSource(input, 'prop("price") * 3');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('30');
+  await page.getByRole('button', { name: 'Switch to history', exact: true }).click();
+  await expect(input).toHaveAttribute('data-value', 'prop("price") * 3');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('30');
+  await page.getByRole('button', { name: 'Set Price to 15', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('30');
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await input.click();
+  await input.press('ControlOrMeta+z');
+  await expect(input).not.toHaveAttribute('data-value', 'prop("price") * 3');
+  await page.getByTestId('formula-editor-cancel').click();
+  await page.getByRole('button', { name: 'Close consumers', exact: true }).click();
+  await expect
+    .poll(async () => {
+      const current = await evidence(page);
+
+      return current.terminated === current.workers;
+    })
+    .toBe(true);
+});
+
+test('native reference metadata distinguishes source from strings and multiline comments', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+  const source =
+    '/* prop("Price")\r\nprop("Quantity") */\r\nif(true, "prop(\\"Price\\")😀", prop( /* keep */ "Price" ))';
+
+  await replaceSource(input, '');
+  await pasteSource(input, source);
+  await expect(input).toHaveAttribute(
+    'data-value',
+    source.replace(/\r\n/g, '\n').replace('/* keep */ "Price"', '/* keep */ "price"')
+  );
+  await expect(page.getByTestId('formula-token')).toHaveCount(1);
+  await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', 'price');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('prop("Price")😀');
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', '');
+  await input.press('ControlOrMeta+Shift+z');
+  await expect(page.getByTestId('formula-token')).toHaveCount(1);
+  await replaceSource(input, '');
+  await pasteSource(input, 'Price * 2');
+  await expect(input).toHaveAttribute('data-value', 'Price * 2');
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+});
+
+test('StrictMode effect replay keeps native editor sessions usable', async ({ page }) => {
+  await page.goto(`${page.url()}?strict=1`);
+  const input = page.getByTestId('formula-editor-input');
+
+  await expect(input).toHaveAttribute('contenteditable', 'true');
+  await replaceSource(input, '41 + 1');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('42');
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText('41 + 1');
+});
+
+test('chip selections survive rename, drag, cut and undo', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+  const source = 'prop("price") * prop("quantity") + 1';
+  const selected = 'prop("price") * prop("quantity")';
+
+  await replaceSource(input, source);
+  await expect(page.getByTestId('formula-token')).toHaveCount(2);
+  await input.press('ControlOrMeta+Home');
+  for (let index = 0; index < 5; index += 1) await input.press('Shift+ArrowRight');
+  await expect.poll(() => copySelection(input)).toBe(selected);
+  await page.getByRole('button', { name: 'Rename and reuse Price', exact: true }).click();
+  await expect(page.getByTestId('formula-token').first()).toHaveText('金额💰');
+  expect(await copySelection(input)).toBe(selected);
+  const dragged = await input.evaluate((element) => {
+    const data = new DataTransfer();
+    const chip = element.querySelectorAll('[data-testid="formula-token"]')[1].querySelector('.truncate')!;
+
+    data.setData('text/plain', '金额💰 * Quantity');
+    chip.dispatchEvent(new DragEvent('dragstart', { dataTransfer: data, bubbles: true, cancelable: true }));
+    const source = data.getData('text/plain');
+    const leaf = Array.from(element.querySelectorAll('[data-slate-string]')).at(-1)!;
+    const box = leaf.getBoundingClientRect();
+
+    leaf.dispatchEvent(
+      new DragEvent('drop', {
+        dataTransfer: data,
+        bubbles: true,
+        cancelable: true,
+        clientX: box.right - 1,
+        clientY: box.top + box.height / 2,
+      })
+    );
+    return source;
+  });
+
+  expect(dragged).toBe(selected);
+  await expect(input).toHaveAttribute('data-value', ` + 1${selected}`);
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', source);
+  await expect(page.getByTestId('formula-token')).toHaveCount(2);
+  await input.press('ControlOrMeta+a');
+  const cut = await input.evaluate((element) => {
+    const data = new DataTransfer();
+
+    element.dispatchEvent(new ClipboardEvent('cut', { clipboardData: data, bubbles: true, cancelable: true }));
+    return data.getData('text/plain');
+  });
+
+  expect(cut).toBe(source);
+  await expect(input).toHaveAttribute('data-value', '');
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', source);
+  await expect(page.getByTestId('formula-token')).toHaveCount(2);
+});
+
+test('cell popover keeps the first Escape for native completion and cancels on the second', async ({ page }) => {
+  await page.goto(`${page.url()}?host=popover`);
+  const input = page.getByTestId('formula-editor-input');
+  const host = page.getByTestId('formula-editor-dialog');
+
+  await expect(host).toHaveAttribute('data-slot', 'popover-content');
+  await replaceSource(input, 'sub');
+  await expect(page.getByTestId('formula-suggestion-Subtotal')).toBeVisible();
+  await input.press('Escape');
+  await expect(page.getByTestId('formula-autocomplete')).toHaveCount(0);
+  await expect(host).toBeVisible();
+  await input.press('Escape');
+  await expect(host).toHaveCount(0);
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+});
+
+test('dialog keyboard save persists the canonical native definition', async ({ page }) => {
+  await page.goto(`${page.url()}?host=dialog`);
+  const input = page.getByTestId('formula-editor-input');
+
+  await expect(page.getByTestId('formula-editor-dialog')).toHaveAttribute('data-slot', 'dialog-content');
+  await replaceSource(input, 'prop("Price") + 1');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") + 1');
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await input.press('ControlOrMeta+Enter');
+  await expect(page.getByTestId('formula-editor-dialog')).toHaveCount(0);
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("price") + 1');
+});
+
+test('ambiguous display names require a property choice and preview uses the selected row', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await page.getByRole('button', { name: 'Duplicate Price name', exact: true }).click();
+  await replaceSource(input, 'prop("Price")');
+  await expect(page.getByTestId('formula-editor-error')).toContainText('ambiguous');
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await replaceSource(input, '');
+  await page.getByTestId('formula-catalogue-property-subtotal').click();
+  await expect(input).toHaveAttribute('data-value', 'prop("subtotal")');
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('20');
+  await page.getByTestId('formula-preview-row').click();
+  await page.getByRole('menuitem', { name: 'Beta', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('15');
+  await expect(page.getByTestId('formula-preview-row')).toHaveText('Beta');
+});
+
+test('property menu displays renamed references from native spans', async ({ page }) => {
+  await page.getByRole('button', { name: 'Property menu', exact: true }).click();
+  const preview = page.getByTestId('formula-edit-formula');
+
+  await expect(preview).toHaveText('prop("Subtotal") + 5');
+  await page.evaluate(() => {
+    const fixture = (window as unknown as { editorFixture: { fields: Map<string, Map<string, unknown>> } })
+      .editorFixture;
+
+    fixture.fields.get('subtotal')!.set('name', '合计🧮');
+  });
+  await expect(preview).toHaveText('prop("合计🧮") + 5');
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("subtotal") + 5');
+});

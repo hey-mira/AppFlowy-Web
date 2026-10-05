@@ -1,23 +1,18 @@
-import { ElementType, KeyboardEvent, MouseEvent, useCallback, useMemo, useRef, useState } from 'react';
+import { ElementType, KeyboardEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useDatabaseFields } from '@/application/database-yjs/context';
+import { useDatabaseContext, useDatabaseFields } from '@/application/database-yjs/context';
+import { FieldType } from '@/application/database-yjs/database.type';
 import { useUpdateFormulaTypeOption } from '@/application/database-yjs/dispatch';
-import {
-  compileFormula,
-  parseFormulaTypeOption,
-  readFormulaSchema,
-  readFormulaSchemaForVersion,
-  toDisplayExpression,
-  toStorageExpression,
-} from '@/application/database-yjs/fields/formula';
+import { parseFormulaTypeOption } from '@/application/database-yjs/fields/formula/parse';
+import { formulaSchemaSignature, readFormulaSchema } from '@/application/database-yjs/fields/formula/schema';
 import { useDatabaseFieldsVersion } from '@/application/database-yjs/hooks/useDatabaseFieldsVersion';
 import { useFieldSelector } from '@/application/database-yjs/selector';
 import { YjsDatabaseKey } from '@/application/types';
 import { ReactComponent as CloseIcon } from '@/assets/icons/close.svg';
 import { Button } from '@/components/ui/button';
 
-import { FormulaEditor } from './FormulaEditor';
+import { FormulaEditor, FormulaEditorHandle } from './FormulaEditor';
 
 export interface FormulaEditorHostProps {
   /** Row the editor was opened from; used as the initial preview row. */
@@ -94,34 +89,78 @@ export function FormulaEditorPanel({
   const { t } = useTranslation();
   const { field } = useFieldSelector(fieldId);
   const fields = useDatabaseFields();
-  const fieldsVersion = useDatabaseFieldsVersion();
-  const schema = readFormulaSchemaForVersion(fields, fieldsVersion);
+
+  useDatabaseFieldsVersion();
+  const context = useDatabaseContext();
   const updateFormulaTypeOption = useUpdateFormulaTypeOption(fieldId);
   const fieldName = String(field?.get(YjsDatabaseKey.name) ?? '');
-  // Read the schema fresh here: this runs once, before the version subscription attaches.
-  const [draftState, setDraftState] = useState(() => {
-    const initialSchema = readFormulaSchema(fields);
+  const [draft, setDraft] = useState(() => (field ? parseFormulaTypeOption(field).formula : ''));
+  const [valid, setValid] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const editorRef = useRef<FormulaEditorHandle>(null);
+  const mounted = useRef(true);
+  const current = useRef({ draft, fields, context });
 
-    return {
-      value: field ? toDisplayExpression(parseFormulaTypeOption(field).formula, initialSchema) : '',
-      schema: initialSchema,
+  current.current = { draft, fields, context };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
     };
-  });
-  // Resolve against the schema used to display this draft, before a rename can
-  // give its old name to another field. Preview and save both keep those IDs.
-  const storageExpression = toStorageExpression(draftState.value, draftState.schema);
-  const draft = draftState.schema === schema ? draftState.value : toDisplayExpression(storageExpression, schema);
+  }, []);
+  const targetError = !field
+    ? 'This property was deleted. Close the editor to continue.'
+    : Number(field.get(YjsDatabaseKey.type)) !== FieldType.Formula
+    ? 'This property is no longer a formula. Close the editor to continue.'
+    : '';
+  const editable = !context.readOnly && !context.dataSource && !targetError;
 
-  if (draftState.schema !== schema) setDraftState({ value: draft, schema });
-  const setDraft = useCallback((value: string) => setDraftState({ value, schema }), [schema]);
-  // Derived, not reported back by the editor: the compile cache makes this a lookup.
-  const valid = useMemo(() => !compileFormula(draft, schema, fieldId).error, [draft, schema, fieldId]);
+  // Formula text follows the existing policy: the latest local Done wins over
+  // concurrent remote formula text. Other type options retain their live values.
+  const handleSave = useCallback(async () => {
+    if (!valid || saving || !editable || !editorRef.current) return;
+    const before = current.current;
 
-  const handleSave = useCallback(() => {
-    if (!valid) return;
-    updateFormulaTypeOption({ formula: storageExpression });
-    onClose();
-  }, [storageExpression, onClose, updateFormulaTypeOption, valid]);
+    setSaving(true);
+    setSaveError('');
+    try {
+      while (mounted.current && current.current.context === before.context && current.current.draft === before.draft) {
+        const freshSchema = readFormulaSchema(before.fields);
+        const target = freshSchema.find((entry) => entry.id === fieldId);
+
+        if (!target || target.type !== FieldType.Formula) return;
+        const signature = formulaSchemaSignature(freshSchema);
+        const definition = await editorRef.current.definition(freshSchema);
+
+        if (!mounted.current || current.current.context !== before.context || current.current.draft !== before.draft)
+          return;
+        const latestSchema = readFormulaSchema(before.fields);
+
+        if (formulaSchemaSignature(latestSchema) !== signature) continue;
+        if (!definition) {
+          setValid(false);
+          setSaveError('The formula could not be saved. Check its current properties and diagnostics.');
+          return;
+        }
+
+        // No asynchronous gap remains between the final schema check and Yjs.
+        updateFormulaTypeOption({ formula: definition.expression });
+        onClose();
+        return;
+      }
+    } catch (error) {
+      if (mounted.current) setSaveError(error instanceof Error ? error.message : 'Formula could not be saved');
+    } finally {
+      if (mounted.current) setSaving(false);
+    }
+  }, [valid, saving, editable, fieldId, updateFormulaTypeOption, onClose]);
+  const changeDraft = useCallback((value: string) => {
+    current.current.draft = value;
+    setDraft(value);
+    setValid(false);
+    setSaveError('');
+  }, []);
 
   return (
     <div className={'flex min-h-0 flex-1 flex-col gap-4'}>
@@ -140,7 +179,12 @@ export function FormulaEditorPanel({
           <Button variant={'ghost'} size={'sm'} onClick={onClose} data-testid={'formula-editor-cancel'}>
             {t('button.cancel')}
           </Button>
-          <Button size={'sm'} disabled={!valid} onClick={handleSave} data-testid={'formula-editor-done'}>
+          <Button
+            size={'sm'}
+            disabled={!valid || saving || !editable}
+            onClick={() => void handleSave()}
+            data-testid={'formula-editor-done'}
+          >
             {t('button.done')}
           </Button>
           <Button
@@ -159,11 +203,14 @@ export function FormulaEditorPanel({
           does not fit. */}
       <div className={'appflowy-scroller flex min-h-0 flex-1 flex-col overflow-y-auto'}>
         <FormulaEditor
+          ref={editorRef}
           fieldId={fieldId}
           value={draft}
-          onChange={setDraft}
+          onChange={changeDraft}
           initialPreviewRowId={rowId}
-          onSubmit={handleSave}
+          onSubmit={() => void handleSave()}
+          onValidationChange={setValid}
+          saveError={targetError || saveError}
           onAutocompleteOpenChange={onAutocompleteOpenChange}
         />
       </div>

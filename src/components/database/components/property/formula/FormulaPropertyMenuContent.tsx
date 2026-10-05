@@ -1,14 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useDatabaseFields } from '@/application/database-yjs/context';
+import { useDatabaseContext, useDatabaseFields } from '@/application/database-yjs/context';
 import { CalculationType } from '@/application/database-yjs/database.type';
 import { useUpdateFormulaTypeOption } from '@/application/database-yjs/dispatch';
 import {
   parseFormulaTypeOption,
   parseFormulaVisualizationOption,
   readFormulaSchemaForVersion,
-  toDisplayExpression,
 } from '@/application/database-yjs/fields/formula';
 import { formats } from '@/application/database-yjs/fields/number/format';
 import { useDatabaseFieldsVersion } from '@/application/database-yjs/hooks/useDatabaseFieldsVersion';
@@ -27,6 +26,13 @@ import {
   DropdownMenuSubTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SearchInput } from '@/components/ui/search-input';
+
+import {
+  displayNativePropertyNames,
+  NativeFormulaEditorSession,
+  nativeEditorProperties,
+  retainNativeSession,
+} from './native-editor';
 
 export function FormulaPropertyMenuContent({
   fieldId,
@@ -48,10 +54,34 @@ export function FormulaPropertyMenuContent({
   }, [field, clock]);
   // Referenced properties can be renamed while the menu is open.
   const fieldsVersion = useDatabaseFieldsVersion();
-  const expressionPreview = useMemo(
-    () => (typeOption ? toDisplayExpression(typeOption.formula, readFormulaSchemaForVersion(fields, fieldsVersion)) : ''),
-    [typeOption, fields, fieldsVersion]
-  );
+  const schema = readFormulaSchemaForVersion(fields, fieldsVersion);
+  const context = useDatabaseContext();
+  const native = useMemo(() => {
+    void context.databaseDoc;
+    return new NativeFormulaEditorSession(fieldId);
+  }, [context.databaseDoc, fieldId]);
+  const [display, setDisplay] = useState<{ source: string; schema: typeof schema; text: string }>();
+
+  useEffect(() => retainNativeSession(native), [native]);
+  useEffect(() => {
+    if (!typeOption) return;
+    let cancelled = false;
+    const source = typeOption.formula;
+
+    void native
+      .state(nativeEditorProperties(schema), source)
+      .then((state) => {
+        if (!cancelled) setDisplay({ source, schema, text: displayNativePropertyNames(state, schema) });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [native, schema, typeOption]);
+  const expressionPreview =
+    display && display.source === typeOption?.formula && display.schema === schema
+      ? display.text
+      : typeOption?.formula ?? '';
   const [formatSearch, setFormatSearch] = useState('');
   const [formatOpen, setFormatOpen] = useState(false);
   const selectedFormat = formats.find((item) => item.value === typeOption?.format);
