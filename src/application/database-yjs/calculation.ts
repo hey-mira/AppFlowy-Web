@@ -22,6 +22,18 @@ export function isNumericCalculation(type: CalculationType): boolean {
   ].includes(type);
 }
 
+/** Native Number median; callers retain their existing empty-population behavior. */
+export function nativeNumberMedian(values: readonly number[]): number {
+  if (values.some(Number.isNaN)) return NaN;
+  // Aggregate selection orders -0 before +0; row sorting keeps stable zero ties.
+  const sorted = [...values].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : Number(Object.is(right, -0)) - Number(Object.is(left, -0))
+  );
+  const middle = Math.floor(sorted.length / 2);
+
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
 function countBy<T>(values: T[], iteratee: (value: T) => string | number): Record<string, number> {
   return values.reduce<Record<string, number>>((result, value) => {
     const key = String(iteratee(value));
@@ -88,13 +100,9 @@ export function calculateFieldValue({
       case CalculationType.Max:
         result = nativeNumbers.reduce((maximum, value) => Math.max(maximum, value));
         break;
-      case CalculationType.Median: {
-        const sorted = [...nativeNumbers].sort((a, b) => a - b);
-        const middle = Math.floor(sorted.length / 2);
-
-        result = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+      case CalculationType.Median:
+        result = nativeNumberMedian(nativeNumbers);
         break;
-      }
     }
 
     if (result !== undefined) return Object.is(result, -0) ? '-0' : String(result);
