@@ -328,6 +328,7 @@ test('canonical copied chips remain bound when a display name is reused', async 
   await input.click();
   await input.press('End');
   await pasteSource(input, ' + ');
+  await expect(input).toHaveAttribute('data-value', 'prop("price") + ');
   await input.evaluate((element) =>
     element.dispatchEvent(
       new ClipboardEvent('paste', {
@@ -421,8 +422,9 @@ test('native token values distinguish source from strings and multiline comments
   await replaceSource(input, '');
   await pasteSource(input, 'Price * 2');
   await expect(input).toHaveAttribute('data-value', 'Price * 2');
-  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
-  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await expect(page.getByTestId('formula-token')).toHaveCount(0);
+  await expect(page.getByTestId('formula-preview-value')).toHaveAttribute('data-evaluation-state', 'not-ready');
+  await expect(page.getByTestId('formula-editor-error')).toContainText('Formula is not ready');
 });
 
 test('real native tokens recognize complete prop calls while syntax errors still block saving', async ({ page }) => {
