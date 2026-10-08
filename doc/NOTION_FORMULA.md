@@ -26,6 +26,7 @@ language implementation.
 | Insert a property or formula             | Completion inserts its stable field ID; the chip displays the current name.                                                                                        |
 | Type or paste `prop("Name")`             | An existing ID wins; otherwise a unique matching name is bound to its ID. Ambiguous or missing names remain diagnosable.                                           |
 | Paste bare text such as `Price * 2`      | Preserve the source. Use property completion or `prop("Price")`; bare names are no longer rewritten by a JavaScript parser.                                        |
+| Complete `prop("id")` beside a syntax error | Display the complete reference as a chip; retain the syntax diagnostic and keep saving disabled. Ordinary string literals remain text.                        |
 | Rename, delete, or reuse a property name | Keep already-bound IDs. Deletion produces a missing-reference diagnostic instead of rebinding to another field.                                                    |
 | Receive schema changes while editing     | Reanalyze without replacing local text, selection, or undo history.                                                                                                |
 | Preview                                  | Evaluate the candidate in a separate Engine. An ordinary row failure does not prohibit saving a statically valid formula.                                          |
