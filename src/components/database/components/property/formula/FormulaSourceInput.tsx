@@ -137,8 +137,8 @@ export const FormulaSourceInput = memo(
         sourceRef.current = value;
       }
 
-      if (nativeState?.definition.expression === value)
-        synchronizeFormulaTokens(editor, nativeState.property_references);
+      if (nativeState?.definition.expression === value && editorSource(editor) === value)
+        synchronizeFormulaTokens(editor, nativeState.tokens);
       setChildren(editor.children);
     }, [editor, nativeState, value]);
 

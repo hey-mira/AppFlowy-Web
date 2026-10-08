@@ -1,5 +1,9 @@
+import { quoteFormulaString } from '@notion-formula/sdk';
+
 import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/schema';
 import { nativePropertyDefinition } from '@/application/database-yjs/formula/native-values';
+
+import { findPropReferences } from './property-references';
 
 import type {
   CompletionItem,
@@ -10,13 +14,11 @@ import type {
   FormulaEdit,
   FormulaEngineClient,
   PropertyDefinition,
-  PropertyReference,
   QuickFix,
   UpdateExpressionResult,
   ValueType,
 } from '@notion-formula/sdk';
 
-export type NativePropertyReference = PropertyReference;
 export type NativeDraftState = FormulaDraftState;
 
 /** Display the complete inferred type, including unions and unknown elements. */
@@ -165,20 +167,20 @@ export function nativeEditorProperties(schema: FormulaFieldSchema[]): PropertyDe
   return schema.map(nativePropertyDefinition);
 }
 
-/** Host name binding uses Rust reference spans, never a second language parser. */
+/** Bind only the quoted String token of a complete native-token prop call. */
 export function bindNativePropertyNames(state: NativeDraftState, schema: FormulaFieldSchema[], boundIds: Set<string>) {
   const edits: FormulaEdit['edits'] = [];
   const ambiguous: string[] = [];
 
-  for (const reference of state.property_references) {
-    if (boundIds.has(reference.property_id) || schema.some((entry) => entry.id === reference.property_id)) continue;
-    const matches = schema.filter((entry) => entry.name === reference.property_id);
+  for (const reference of findPropReferences(state.definition.expression, state.tokens)) {
+    if (boundIds.has(reference.ref) || schema.some((entry) => entry.id === reference.ref)) continue;
+    const matches = schema.filter((entry) => entry.name === reference.ref);
 
     if (matches.length === 1) {
-      edits.push({ range: reference.id_span, new_text: JSON.stringify(matches[0].id) });
+      edits.push({ range: reference.idSpan, new_text: quoteFormulaString(matches[0].id) });
       boundIds.add(matches[0].id);
     } else if (matches.length > 1)
-      ambiguous.push(`Property name "${reference.property_id}" is ambiguous. Choose a property from the list.`);
+      ambiguous.push(`Property name "${reference.ref}" is ambiguous. Choose a property from the list.`);
   }
 
   return { edit: { base_version: state.version, edits }, ambiguous };
@@ -187,12 +189,14 @@ export function bindNativePropertyNames(state: NativeDraftState, schema: Formula
 export function displayNativePropertyNames(state: NativeDraftState, schema: FormulaFieldSchema[]) {
   let source = state.definition.expression;
 
-  [...state.property_references].reverse().forEach((reference) => {
-    const entry = schema.find((entry) => entry.id === reference.property_id);
+  findPropReferences(state.definition.expression, state.tokens)
+    .reverse()
+    .forEach((reference) => {
+      const entry = schema.find((entry) => entry.id === reference.ref);
 
-    if (entry)
-      source =
-        source.slice(0, reference.id_span.start) + JSON.stringify(entry.name) + source.slice(reference.id_span.end);
-  });
+      if (entry)
+        source =
+          source.slice(0, reference.idSpan.start) + quoteFormulaString(entry.name) + source.slice(reference.idSpan.end);
+    });
   return source;
 }

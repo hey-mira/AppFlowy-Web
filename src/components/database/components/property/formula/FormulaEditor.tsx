@@ -44,6 +44,7 @@ import {
   nativeFormulaTypeLabel,
   retainNativeSession,
 } from './native-editor';
+import { findPropReferences } from './property-references';
 import { useNativeFormulaPreview } from './use-native-preview';
 
 import type { CompletionItem, FormulaDefinition, FormulaEdit, SignatureHelp } from '@notion-formula/sdk';
@@ -180,9 +181,11 @@ export const FormulaEditor = forwardRef<FormulaEditorHandle, FormulaEditorProps>
       void session
         .analyze(properties, value, caret)
         .then(async (analysis) => {
-          if (!current()) return;
+          if (!current() || analysis.state.definition.expression !== value) return;
+          const references = findPropReferences(value, analysis.state.tokens);
+
           if (value === initialExpression.current)
-            analysis.state.property_references.forEach((reference) => boundIds.current.add(reference.property_id));
+            references.forEach((reference) => boundIds.current.add(reference.ref));
           const binding = bindNativePropertyNames(analysis.state, editSchema.current, boundIds.current);
 
           if (binding.edit.edits.length > 0) {
@@ -193,8 +196,8 @@ export const FormulaEditor = forwardRef<FormulaEditorHandle, FormulaEditorProps>
             return;
           }
 
-          analysis.state.property_references.forEach((reference) => {
-            if (schema.some((entry) => entry.id === reference.property_id)) boundIds.current.add(reference.property_id);
+          references.forEach((reference) => {
+            if (schema.some((entry) => entry.id === reference.ref)) boundIds.current.add(reference.ref);
           });
           setSnapshot({ source: value, schema, caret, analysis, error: binding.ambiguous[0] });
           setInitialized(true);

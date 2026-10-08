@@ -1,11 +1,13 @@
 import { StrictMode, Suspense, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { quoteFormulaString } from '@notion-formula/sdk';
 import * as Y from 'yjs';
 
 import { FormulaCell } from '@/application/database-yjs/cell.type';
 import { DatabaseContext, DatabaseContextState } from '@/application/database-yjs/context';
 import { CalculationType, FieldType, RollupDisplayMode } from '@/application/database-yjs/database.type';
 import { parseFormulaTypeOption } from '@/application/database-yjs/fields/formula/parse';
+import { readFormulaSchema } from '@/application/database-yjs/fields/formula/schema';
 import { markDatabaseHistoryDocumentImmutable } from '@/application/database-yjs/immutable';
 import { useCellSelector } from '@/application/database-yjs/selector';
 import { db } from '@/application/db';
@@ -27,6 +29,12 @@ import { FormulaEditorDialog } from '@/components/database/components/property/f
 import { FormulaEditorPanel } from '@/components/database/components/property/formula/FormulaEditorPanel';
 import { FormulaEditorPopover } from '@/components/database/components/property/formula/FormulaEditorPopover';
 import { FormulaPropertyMenuContent } from '@/components/database/components/property/formula/FormulaPropertyMenuContent';
+import {
+  displayNativePropertyNames,
+  NativeFormulaEditorSession,
+  nativeEditorProperties,
+} from '@/components/database/components/property/formula/native-editor';
+import { findPropReferences } from '@/components/database/components/property/formula/property-references';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import '@/i18n/config';
 import '@/styles/global.css';
@@ -389,6 +397,37 @@ function Committed() {
   );
 }
 
+async function inspectExpression(expression: string, source = expression) {
+  const schema = readFormulaSchema(fields);
+  const native = new NativeFormulaEditorSession('token-inspection');
+
+  try {
+    const state = await native.state(nativeEditorProperties(schema), expression);
+
+    return snapshot({
+      references: findPropReferences(source, state.tokens),
+      tokens: state.tokens,
+      diagnostics: state.diagnostics,
+      display: displayNativePropertyNames(state, schema),
+    });
+  } finally {
+    native.close();
+  }
+}
+
+function addTextProperty(id: string, name: string, value: string) {
+  databaseDoc.transact(() => {
+    field(id, name, FieldType.RichText);
+    for (const doc of Object.values(rowDocs)) {
+      const cell = new Y.Map() as YDatabaseCell;
+
+      cell.set(K.field_type, FieldType.RichText);
+      cell.set(K.data, value);
+      (doc.getMap(E.data_section).get(E.database_row) as YDatabaseRow).get(K.cells).set(id, cell);
+    }
+  });
+}
+
 async function setMemberName(name: string) {
   await db.workspace_member_profiles.put({
     workspace_id: 'workspace',
@@ -576,6 +615,14 @@ Object.assign(window, {
     historyDoc,
     rowDocs,
     fields,
+    inspectExpression,
+    quoteFormulaString,
+    addTextProperty,
+    holdNextReply: (method: string) => {
+      evidence.holdNext = method;
+    },
+    setSavedExpression: (expression: string) =>
+      fields.get('total').get(K.type_option).get(String(FieldType.Formula)).set(K.expression, expression),
     addClockFormula: () => field('clock', 'Clock', FieldType.Formula, 'timestamp(now())'),
     enableExternalSources,
     setMemberName,

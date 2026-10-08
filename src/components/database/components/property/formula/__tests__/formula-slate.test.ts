@@ -20,10 +20,10 @@ import {
   withFormulaTokens,
 } from '../formula-slate';
 
-import type { NativePropertyReference } from '../native-editor';
+import type { Token } from '@notion-formula/sdk';
 
-// These are explicit metadata fixtures, supplied by the native language layer.
-// This host test does not discover references or bind property names.
+// Explicit native-token fixtures only exercise Slate manipulation.
+// Real-WASM browser tests cover reference recognition and property name binding.
 const referenceFixtures: Record<string, Array<[string, number, number]>> = {
   'if(prop("Done"),\n  prop("Price") * 2,\n  0)': [
     ['Done', 3, 15],
@@ -68,24 +68,30 @@ const referenceFixtures: Record<string, Array<[string, number, number]>> = {
   '1\n+ prop("Price") * 2': [['Price', 4, 17]],
 };
 
-function references(source: string): NativePropertyReference[] {
-  return (referenceFixtures[source] ?? []).map(([property_id, start, end]) => ({
-    property_id,
-    span: { start, end },
-    id_span: { start: start + 5, end: end - 1 },
-  }));
+function nativeTokens(source: string): Token[] {
+  return (referenceFixtures[source] ?? []).flatMap(([ref, start, end]) => [
+    { kind: 'Ident', text: 'prop', span: { start, end: start + 4 }, string_value: null },
+    { kind: 'OpenParen', text: '(', span: { start: start + 4, end: start + 5 }, string_value: null },
+    {
+      kind: 'String',
+      text: source.slice(start + 5, end - 1),
+      span: { start: start + 5, end: end - 1 },
+      string_value: ref,
+    },
+    { kind: 'CloseParen', text: ')', span: { start: end - 1, end }, string_value: null },
+  ]);
 }
 
 function makeEditor(source = '') {
   const editor = withFormulaTokens(withHistory(createEditor()));
-  editor.children = sourceToNodes(source, references(source));
+  editor.children = sourceToNodes(source, nativeTokens(source));
   Editor.normalize(editor, { force: true });
   Transforms.select(editor, offsetToPoint(editor, source.length));
   return editor;
 }
 
 function refreshTokens(editor: Editor) {
-  synchronizeFormulaTokens(editor, references(editorSource(editor)));
+  synchronizeFormulaTokens(editor, nativeTokens(editorSource(editor)));
 }
 
 function tokens(editor: Editor): FormulaPropElement[] {

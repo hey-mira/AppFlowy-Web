@@ -1,8 +1,9 @@
 import { Descendant, Editor, Element, Node, Path, Point, Range, Text, Transforms } from 'slate';
 import { HistoryEditor, MERGING } from 'slate-history';
 
-import type { NativePropertyReference } from './native-editor';
-import type { TextEdit } from '@notion-formula/sdk';
+import { findPropReferences, FormulaPropMatch } from './property-references';
+
+import type { TextEdit, Token } from '@notion-formula/sdk';
 
 /**
  * The formula editor is a small Slate document: one `formula-line` element per
@@ -26,25 +27,12 @@ export interface FormulaPropElement {
   children: [{ text: '' }];
 }
 
-export interface FormulaPropMatch {
-  start: number;
-  end: number;
-  ref: string;
-}
-
 export function isFormulaProp(node: unknown): node is FormulaPropElement {
   return Element.isElement(node) && node.type === FORMULA_PROP;
 }
 
 function isFormulaLine(node: unknown): node is Element {
   return Element.isElement(node) && node.type === FORMULA_LINE;
-}
-
-/** Rust has already identified these calls; source offsets remain UTF-16. */
-export function findPropReferences(text: string, references: NativePropertyReference[] = []): FormulaPropMatch[] {
-  return references
-    .filter((reference) => reference.span.start >= 0 && reference.span.end <= text.length)
-    .map((reference) => ({ start: reference.span.start, end: reference.span.end, ref: reference.property_id }));
 }
 
 function propElement(source: string, ref: string): FormulaPropElement {
@@ -66,10 +54,10 @@ function lineChildren(line: string, matches: FormulaPropMatch[]): Descendant[] {
   return children;
 }
 
-export function sourceToNodes(source: string, nativeReferences: NativePropertyReference[] = []): Descendant[] {
+export function sourceToNodes(source: string, nativeTokens: Token[] = []): Descendant[] {
   // References are read off the whole source, since a string or comment can
   // span lines; a call split over lines stays text.
-  const references = findPropReferences(source, nativeReferences);
+  const references = findPropReferences(source, nativeTokens);
   let lineStart = 0;
 
   return source.split('\n').map((line) => {
@@ -396,9 +384,9 @@ export function applySourceEdits(editor: Editor, edits: TextEdit[], cursor: numb
 }
 
 /** Token metadata arrives asynchronously, but never changes formula text. */
-export function synchronizeFormulaTokens(editor: Editor, references: NativePropertyReference[]) {
+export function synchronizeFormulaTokens(editor: Editor, tokens: Token[]) {
   const source = editorSource(editor);
-  const matches = findPropReferences(source, references).filter(
+  const matches = findPropReferences(source, tokens).filter(
     ({ start, end }) => !source.slice(start, end).includes('\n')
   );
   const selection = selectionOffsets(editor);

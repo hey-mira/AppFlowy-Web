@@ -5,6 +5,7 @@ import { expect } from '@playwright/test';
 import { test } from '../../support/native-formula-editor-server';
 
 import type { Locator, Page } from '@playwright/test';
+import type { Token } from '@notion-formula/sdk';
 
 test.use({ timezoneId: 'Asia/Singapore' });
 
@@ -37,6 +38,30 @@ type MemberPreviewFixture = {
   setMemberName: (name: string) => Promise<void>;
   trackClockSubscriptions: () => void;
 };
+
+type TokenInspection = {
+  references: Array<{ ref: string; start: number; end: number; idSpan: { start: number; end: number } }>;
+  tokens: Token[];
+  diagnostics: unknown[];
+  display: string;
+};
+
+type TokenEditorFixture = {
+  inspectExpression: (expression: string, source?: string) => Promise<TokenInspection>;
+  quoteFormulaString: (value: string) => string;
+  addTextProperty: (id: string, name: string, value: string) => void;
+  holdNextReply: (method: string) => void;
+  setSavedExpression: (expression: string) => void;
+  fields: Map<string, Map<string, unknown>>;
+};
+
+async function inspectExpression(page: Page, expression: string, source?: string) {
+  return page.evaluate(
+    ({ expression, source }) =>
+      (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture.inspectExpression(expression, source),
+    { expression, source }
+  );
+}
 
 async function enableExternalPreview(page: Page, options: { cold?: boolean; clock?: boolean; people?: boolean } = {}) {
   await page.getByRole('button', { name: 'Close consumers', exact: true }).click();
@@ -375,7 +400,7 @@ test('historical preview remains isolated and editor Workers close on cancel', a
     .toBe(true);
 });
 
-test('native reference metadata distinguishes source from strings and multiline comments', async ({ page }) => {
+test('native token values distinguish source from strings and multiline comments', async ({ page }) => {
   const input = page.getByTestId('formula-editor-input');
   const source =
     '/* prop("Price")\r\nprop("Quantity") */\r\nif(true, "prop(\\"Price\\")😀", prop( /* keep */ "Price" ))';
@@ -398,6 +423,178 @@ test('native reference metadata distinguishes source from strings and multiline 
   await expect(input).toHaveAttribute('data-value', 'Price * 2');
   await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
   await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+});
+
+test('real native tokens recognize complete prop calls while syntax errors still block saving', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+  const cases: Array<{ source: string; refs: string[]; chips?: string[]; invalid?: boolean }> = [
+    { source: '["price", format(prop("price"))]', refs: ['price'] },
+    { source: '"😀" + prop /*before*/ ( /*inside*/ "price" /*after*/ )', refs: ['price'] },
+    { source: 'prop(\n/* inside */ "price"\n)', refs: ['price'], chips: [] },
+    { source: '/* prop("price") */ "prop(\\"price\\")"', refs: [] },
+    { source: 'prop("price")prop("quantity")', refs: ['price', 'quantity'], invalid: true },
+    {
+      source: 'prop("missing") + prop("price") + prop("missing")',
+      refs: ['missing', 'price', 'missing'],
+      invalid: true,
+    },
+    { source: 'prop("")', refs: [''], invalid: true },
+    { source: 'prop("price", "quantity")', refs: [], invalid: true },
+    { source: 'prop("price" + "")', refs: [], invalid: true },
+    { source: 'prop()', refs: [], invalid: true },
+    { source: 'prop("price"', refs: [], invalid: true },
+    { source: 'prop("price)', refs: [], invalid: true },
+    { source: String.raw`prop("bad\q")`, refs: [], invalid: true },
+    { source: String.raw`prop("bad\u0061")`, refs: [], invalid: true },
+    { source: '"x" /* receiver */ . /* member */ prop("price")', refs: [], invalid: true },
+    { source: 'prop("price").prop("other")', refs: ['price'], invalid: true },
+  ];
+
+  for (const { source, refs, chips = refs, invalid } of cases) {
+    const inspection = await inspectExpression(page, source);
+
+    expect(
+      inspection.references.map((reference) => reference.ref),
+      source
+    ).toEqual(refs);
+    for (const reference of inspection.references) {
+      expect(source.slice(reference.start, reference.end), source).toContain('prop');
+      const literal = inspection.tokens.find(
+        (token) => token.span.start === reference.idSpan.start && token.span.end === reference.idSpan.end
+      );
+
+      expect(literal?.kind, source).toBe('String');
+      expect(literal?.text, source).toBe(source.slice(reference.idSpan.start, reference.idSpan.end));
+      expect(literal?.string_value, source).toBe(reference.ref);
+    }
+
+    await replaceSource(input, '');
+    await pasteSource(input, source);
+    await expect(input, source).toHaveAttribute('data-value', source);
+    await expect(page.getByTestId('formula-token'), source).toHaveCount(chips.length);
+    expect(
+      await page.getByTestId('formula-token').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-ref'))),
+      source
+    ).toEqual(chips);
+    if (invalid) {
+      expect(inspection.diagnostics.length, source).toBeGreaterThan(0);
+      await expect(page.getByTestId('formula-editor-done'), source).toBeDisabled();
+    }
+  }
+});
+
+test('escaped native values bind only property arguments and round-trip through rename, docs, clipboard and undo', async ({
+  page,
+}) => {
+  const input = page.getByTestId('formula-editor-input');
+  const id = 'field-"\\中文😀\b';
+  const name = '名称 "path\\你好😀';
+  const value = 'value "\\中文😀';
+  const { idLiteral, nameLiteral } = await page.evaluate(
+    ({ id, name, value }) => {
+      const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
+
+      fixture.addTextProperty(id, name, value);
+      return { idLiteral: fixture.quoteFormulaString(id), nameLiteral: fixture.quoteFormulaString(name) };
+    },
+    { id, name, value }
+  );
+  const source = `[${nameLiteral}, prop /* keep */ (${nameLiteral})]`;
+  const canonical = `[${nameLiteral}, prop /* keep */ (${idLiteral})]`;
+  const inspection = await inspectExpression(page, source);
+
+  expect(inspection.references.map((reference) => reference.ref)).toEqual([name]);
+  expect(inspection.tokens.filter((token) => token.kind === 'String').map((token) => token.string_value)).toEqual([
+    name,
+    name,
+  ]);
+  expect(inspection.tokens.every((token) => source.slice(token.span.start, token.span.end) === token.text)).toBe(true);
+  await replaceSource(input, '');
+  await pasteSource(input, source);
+  await expect(input).toHaveAttribute('data-value', canonical);
+  await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', id);
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', '');
+  await input.press('ControlOrMeta+Shift+z');
+  await expect(input).toHaveAttribute('data-value', canonical);
+  await expect(page.getByTestId('formula-token')).toHaveCount(1);
+  await input.press('ControlOrMeta+a');
+  expect(await copySelection(input)).toBe(canonical);
+  const bound = await inspectExpression(page, canonical);
+
+  expect(bound.diagnostics).toEqual([]);
+  expect(bound.references.map((reference) => reference.ref)).toEqual([id]);
+  expect(bound.tokens.filter((token) => token.kind === 'String').map((token) => token.string_value)).toEqual([name, id]);
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText(canonical);
+  const renamed = '重命名 "next\\😀\n行';
+  const renamedLiteral = await page.evaluate(
+    ({ id, renamed }) => {
+      const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
+
+      fixture.fields.get(id)!.set('name', renamed);
+      return fixture.quoteFormulaString(renamed);
+    },
+    { id, renamed }
+  );
+
+  await page.getByRole('button', { name: 'Property menu', exact: true }).click();
+  await expect(page.getByTestId('formula-edit-formula')).toHaveText(
+    `[${nameLiteral}, prop /* keep */ (${renamedLiteral})]`
+  );
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await expect(input).toHaveAttribute('data-value', canonical);
+  await expect(page.getByTestId('formula-token')).toHaveText(renamed);
+  await input.press('ControlOrMeta+a');
+  await input.press('Escape');
+  await page.getByTestId(`formula-catalogue-property-${id}`).hover();
+  const example = page.getByTestId('formula-docs').locator('[data-expression]').first();
+
+  await expect(example).toHaveAttribute('data-expression', `prop(${idLiteral})`);
+  await example.click();
+  await expect(input).toHaveAttribute('data-value', `prop(${idLiteral})`);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText(value);
+  await input.press('ControlOrMeta+z');
+  await expect(input).toHaveAttribute('data-value', canonical);
+});
+
+test('stale native token snapshots cannot chip or bind newer source', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+  const stale = await inspectExpression(page, 'prop("price")', 'prop("other")');
+
+  expect(stale.references).toEqual([]);
+  await page.evaluate(() =>
+    (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture.holdNextReply('draft.updateExpression')
+  );
+  await replaceSource(input, '');
+  await pasteSource(input, 'prop("Price")');
+  await expect.poll(async () => (await evidence(page)).held).toBe(true);
+  await replaceSource(input, '');
+  await pasteSource(input, '"Price"');
+  await page.getByRole('button', { name: 'Release reply', exact: true }).click();
+  await expect(page.getByTestId('formula-preview-value')).toHaveText('Price');
+  await expect(input).toHaveAttribute('data-value', '"Price"');
+  await expect(page.getByTestId('formula-token')).toHaveCount(0);
+});
+
+test('startup tracking retains an unresolved saved ID matching a current display name', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await page.getByTestId('formula-editor-cancel').click();
+  await page.evaluate(() => {
+    const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
+
+    fixture.addTextProperty('new-id', 'legacy-id', 'new field');
+    fixture.setSavedExpression('prop("legacy-id")');
+  });
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await expect(input).toHaveAttribute('data-value', 'prop("legacy-id")');
+  await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', 'legacy-id');
+  await expect(page.getByTestId('formula-token')).toHaveAttribute('data-missing', 'true');
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await expect(page.getByTestId('saved-expression')).toHaveText('prop("legacy-id")');
 });
 
 test('StrictMode effect replay keeps native editor sessions usable', async ({ page }) => {

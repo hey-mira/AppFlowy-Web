@@ -9,6 +9,7 @@ import {
   readNativeInput,
 } from '@/application/database-yjs/formula/native-values';
 import { FORMULA_FUNCTION_DOCS } from '@/components/database/components/property/formula/formula-docs';
+import { findPropReferences } from '@/components/database/components/property/formula/property-references';
 
 import { businessNow, businessScenarios, BusinessRow } from '../fixtures/native-formula-business';
 import { workflowDefinitions, workflowInputs, workflowRows } from '../fixtures/native-formula-workflows';
@@ -181,8 +182,7 @@ async function run(): Promise<CompatibilityReport> {
   try {
     const states: FormulaDraftState[] = [];
 
-    // Native references decide which examples need a host database. Do not
-    // classify formula source with a second parser or string/regexp scanning.
+    // Complete native-token prop calls decide which examples need a host database.
     for (const definition of definitions) {
       const draft = await engine.createDraft(definition);
 
@@ -193,7 +193,9 @@ async function run(): Promise<CompatibilityReport> {
       }
     }
 
-    const requested = definitions.filter((_, index) => states[index].property_references.length === 0);
+    const requested = definitions.filter(
+      (_, index) => findPropReferences(states[index].definition.expression, states[index].tokens).length === 0
+    );
     const result = await engine.evaluate({
       row_ids: [rowId],
       columns: new Map(),
@@ -214,7 +216,8 @@ async function run(): Promise<CompatibilityReport> {
           diagnostics: state.diagnostics.map((diagnostic) => diagnostic.message),
         };
 
-        if (state.property_references.length) return { ...base, status: 'requires-properties' };
+        if (findPropReferences(state.definition.expression, state.tokens).length)
+          return { ...base, status: 'requires-properties' };
         const output = result.formulas.get(definitions[index].id);
 
         if (!output || 'Err' in output) return { ...base, status: 'invalid' };
