@@ -1,6 +1,7 @@
 const { compilerOptions } = require('./tsconfig.json');
 const { pathsToModuleNameMapper } = require('ts-jest');
 const esModules = ['lodash-es', 'nanoid', 'uuid', 'unified', 'rehype-parse', 'remark-parse', 'remark-gfm', 'hast-.*', 'mdast-.*', 'unist-.*', 'vfile', 'bail', 'is-plain-obj', 'trough', 'micromark', 'decode-named-character-reference', 'character-entities', 'mdast-util-.*', 'micromark-.*', 'ccount', 'escape-string-regexp', 'markdown-table', 'devlop', 'zwitch', 'longest-streak', 'trim-lines'].join('|');
+const slateTest = '<rootDir>/src/components/database/components/property/formula/__tests__/formula-slate.test.ts';
 
 /** @type {import('ts-jest').JestConfigWithTsJest} */
 module.exports = {
@@ -31,7 +32,7 @@ module.exports = {
     `node_modules/(?!.pnpm|${esModules})`,
   ],
   testMatch: ['**/*.test.ts', '**/*.test.tsx'],
-  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/', '\\.integration\\.test\\.ts$'],
+  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/', '\\.integration\\.test\\.ts$', slateTest],
   modulePathIgnorePatterns: ['<rootDir>/\\.claude/'],
   coverageDirectory: '<rootDir>/coverage/jest',
   collectCoverage: true,

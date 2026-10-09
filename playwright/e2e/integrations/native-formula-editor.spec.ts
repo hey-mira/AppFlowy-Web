@@ -15,6 +15,7 @@ type Evidence = {
   held: boolean;
   clockOwners: number;
   requests: Array<{ worker: number; method: string; args: unknown[] }>;
+  replies: Array<{ worker: number; method: string; value: unknown }>;
   observed: Array<{ source: string; preview: string; diagnostics: string }>;
   external: {
     bindings: number;
@@ -401,7 +402,7 @@ test('historical preview remains isolated and editor Workers close on cancel', a
     .toBe(true);
 });
 
-test('native token values distinguish source from strings and multiline comments', async ({ page }) => {
+test('native token source distinguishes strings and multiline comments', async ({ page }) => {
   const input = page.getByTestId('formula-editor-input');
   const source =
     '/* prop("Price")\r\nprop("Quantity") */\r\nif(true, "prop(\\"Price\\")😀", prop( /* keep */ "Price" ))';
@@ -446,14 +447,29 @@ test('real native tokens recognize complete prop calls while syntax errors still
     { source: 'prop()', refs: [], invalid: true },
     { source: 'prop("price"', refs: [], invalid: true },
     { source: 'prop("price)', refs: [], invalid: true },
+    { source: "prop('price')", refs: [], invalid: true },
+    { source: 'prop("price\')', refs: [], invalid: true },
+    { source: 'prop("price\\)', refs: [], invalid: true },
     { source: String.raw`prop("bad\q")`, refs: [], invalid: true },
     { source: String.raw`prop("bad\u0061")`, refs: [], invalid: true },
+    { source: String.raw`prop("bad\'")`, refs: [], invalid: true },
     { source: '"x" /* receiver */ . /* member */ prop("price")', refs: [], invalid: true },
     { source: 'prop("price").prop("other")', refs: ['price'], invalid: true },
   ];
 
   for (const { source, refs, chips = refs, invalid } of cases) {
     const inspection = await inspectExpression(page, source);
+    const workerState = (await evidence(page)).replies
+      .filter((reply) => reply.method === 'draft.getState')
+      .map((reply) => reply.value as { definition: { expression: string }; tokens: Token[] })
+      .reverse()
+      .find((state) => state.definition.expression === source);
+
+    expect(workerState?.tokens, source).toEqual(inspection.tokens);
+    for (const token of workerState?.tokens ?? []) {
+      expect(Object.keys(token).sort(), source).toEqual(['kind', 'span', 'text']);
+      expect(token.text, source).toBe(source.slice(token.span.start, token.span.end));
+    }
 
     expect(
       inspection.references.map((reference) => reference.ref),
@@ -467,7 +483,6 @@ test('real native tokens recognize complete prop calls while syntax errors still
 
       expect(literal?.kind, source).toBe('String');
       expect(literal?.text, source).toBe(source.slice(reference.idSpan.start, reference.idSpan.end));
-      expect(literal?.string_value, source).toBe(reference.ref);
     }
 
     await replaceSource(input, '');
@@ -485,12 +500,12 @@ test('real native tokens recognize complete prop calls while syntax errors still
   }
 });
 
-test('escaped native values bind only property arguments and round-trip through rename, docs, clipboard and undo', async ({
+test('escaped property literals bind only arguments and round-trip through rename, docs, clipboard and undo', async ({
   page,
 }) => {
   const input = page.getByTestId('formula-editor-input');
-  const id = 'field-"\\中文😀\b';
-  const name = '名称 "path\\你好😀';
+  const id = 'field-"\\中文😀\n\t\b';
+  const name = '名称 "path\\你好😀\n\t';
   const value = 'value "\\中文😀';
   const { idLiteral, nameLiteral } = await page.evaluate(
     ({ id, name, value }) => {
@@ -506,9 +521,9 @@ test('escaped native values bind only property arguments and round-trip through 
   const inspection = await inspectExpression(page, source);
 
   expect(inspection.references.map((reference) => reference.ref)).toEqual([name]);
-  expect(inspection.tokens.filter((token) => token.kind === 'String').map((token) => token.string_value)).toEqual([
-    name,
-    name,
+  expect(inspection.tokens.filter((token) => token.kind === 'String').map((token) => token.text)).toEqual([
+    nameLiteral,
+    nameLiteral,
   ]);
   expect(inspection.tokens.every((token) => source.slice(token.span.start, token.span.end) === token.text)).toBe(true);
   await replaceSource(input, '');
@@ -527,10 +542,13 @@ test('escaped native values bind only property arguments and round-trip through 
 
   expect(bound.diagnostics).toEqual([]);
   expect(bound.references.map((reference) => reference.ref)).toEqual([id]);
-  expect(bound.tokens.filter((token) => token.kind === 'String').map((token) => token.string_value)).toEqual([name, id]);
+  expect(bound.tokens.filter((token) => token.kind === 'String').map((token) => token.text)).toEqual([
+    nameLiteral,
+    idLiteral,
+  ]);
   await page.getByTestId('formula-editor-done').click();
   await expect(page.getByTestId('saved-expression')).toHaveText(canonical);
-  const renamed = '重命名 "next\\😀\n行';
+  const renamed = '重命名 "next\\😀\n\t行';
   const renamedLiteral = await page.evaluate(
     ({ id, renamed }) => {
       const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;

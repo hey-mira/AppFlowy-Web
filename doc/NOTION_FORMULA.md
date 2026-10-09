@@ -21,6 +21,10 @@ language implementation.
 
 ## Editor behavior
 
+The editor recognizes complete `prop(String)` calls in the current native token
+snapshot and decodes their arguments on demand with the SDK's synchronous string
+codec. Tokens carry only `kind`, raw source `text`, and `span`.
+
 | Action                                   | Behavior                                                                                                                                                           |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Insert a property or formula             | Completion inserts its stable field ID; the chip displays the current name.                                                                                        |
@@ -91,3 +95,7 @@ FORMULA_FIXTURE_PRODUCTION=1 pnpm exec playwright test native-formula --config=p
 The runtime, editor, consumer, and compatibility suites write JSON evidence and screenshots to
 `test-results/`; Playwright attaches them to its report. The production run builds
 the fixtures with Vite and loads emitted Worker and WASM assets.
+
+`pnpm test` runs the Slate suite in a separate ESM process that imports the public
+SDK. Other unit suites keep their CommonJS runner. Coverage reports stay in
+`coverage/jest/`, with Slate coverage in `coverage/jest/formula-slate/`.

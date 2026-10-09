@@ -24,61 +24,60 @@ import type { Token } from '@notion-formula/sdk';
 
 // Explicit native-token fixtures only exercise Slate manipulation.
 // Real-WASM browser tests cover reference recognition and property name binding.
-const referenceFixtures: Record<string, Array<[string, number, number]>> = {
+const referenceFixtures: Record<string, Array<[number, number]>> = {
   'if(prop("Done"),\n  prop("Price") * 2,\n  0)': [
-    ['Done', 3, 15],
-    ['Price', 19, 32],
+    [3, 15],
+    [19, 32],
   ],
-  '1 + prop("Price")': [['Price', 4, 17]],
-  'a\nprop("B") + c': [['B', 2, 11]],
-  'upper(prop("Price"))': [['Price', 6, 19]],
+  '1 + prop("Price")': [[4, 17]],
+  'a\nprop("B") + c': [[2, 11]],
+  'upper(prop("Price"))': [[6, 19]],
   'x + prop("A") +\n prop("B")': [
-    ['A', 4, 13],
-    ['B', 17, 26],
+    [4, 13],
+    [17, 26],
   ],
-  'prop("A")': [['A', 0, 9]],
-  'prop("A") + 1': [['A', 0, 9]],
-  '1 + prop("Price") * 2': [['Price', 4, 17]],
-  'prop("A")\n2': [['A', 0, 9]],
-  'upper(prop("Name"))': [['Name', 6, 18]],
-  '1 + prop("Price") + 2': [['Price', 4, 17]],
-  'max(prop("Price"), 3)': [['Price', 4, 17]],
+  'prop("A")': [[0, 9]],
+  'prop("A") + 1': [[0, 9]],
+  '1 + prop("Price") * 2': [[4, 17]],
+  'prop("A")\n2': [[0, 9]],
+  'upper(prop("Name"))': [[6, 18]],
+  '1 + prop("Price") + 2': [[4, 17]],
+  'max(prop("Price"), 3)': [[4, 17]],
   'prop("Price") +\n prop("Amount")\n2': [
-    ['Price', 0, 13],
-    ['Amount', 17, 31],
+    [0, 13],
+    [17, 31],
   ],
   'prop("Price") + prop("Amount")': [
-    ['Price', 0, 13],
-    ['Amount', 16, 30],
+    [0, 13],
+    [16, 30],
   ],
-  'prop("Notes")': [['Notes', 0, 13]],
+  'prop("Notes")': [[0, 13]],
   'prop("Price")prop("Amount")': [
-    ['Price', 0, 13],
-    ['Amount', 13, 27],
+    [0, 13],
+    [13, 27],
   ],
   'prop("Price") * prop("Amount")': [
-    ['Price', 0, 13],
-    ['Amount', 16, 30],
+    [0, 13],
+    [16, 30],
   ],
   '1 + prop("Price") *\nprop("Amount")': [
-    ['Price', 4, 17],
-    ['Amount', 20, 34],
+    [4, 17],
+    [20, 34],
   ],
-  'pi() * prop("Amount") ^ 2': [['Amount', 7, 21]],
-  '1\n+ prop("Price") * 2': [['Price', 4, 17]],
+  'pi() * prop("Amount") ^ 2': [[7, 21]],
+  '1\n+ prop("Price") * 2': [[4, 17]],
 };
 
 function nativeTokens(source: string): Token[] {
-  return (referenceFixtures[source] ?? []).flatMap(([ref, start, end]) => [
-    { kind: 'Ident', text: 'prop', span: { start, end: start + 4 }, string_value: null },
-    { kind: 'OpenParen', text: '(', span: { start: start + 4, end: start + 5 }, string_value: null },
+  return (referenceFixtures[source] ?? []).flatMap(([start, end]) => [
+    { kind: 'Ident', text: 'prop', span: { start, end: start + 4 } },
+    { kind: 'OpenParen', text: '(', span: { start: start + 4, end: start + 5 } },
     {
       kind: 'String',
       text: source.slice(start + 5, end - 1),
       span: { start: start + 5, end: end - 1 },
-      string_value: ref,
     },
-    { kind: 'CloseParen', text: ')', span: { start: end - 1, end }, string_value: null },
+    { kind: 'CloseParen', text: ')', span: { start: end - 1, end } },
   ]);
 }
 

@@ -1,3 +1,5 @@
+import { decodeFormulaString } from '@notion-formula/sdk';
+
 import type { Span, Token } from '@notion-formula/sdk';
 
 export interface FormulaPropMatch {
@@ -43,14 +45,16 @@ export function findPropReferences(source: string, tokens: Token[]): FormulaProp
       significant[index - 1]?.kind === 'Dot' ||
       open?.kind !== 'OpenParen' ||
       argument?.kind !== 'String' ||
-      typeof argument.string_value !== 'string' ||
       close?.kind !== 'CloseParen'
     )
       continue;
+    const ref = decodeFormulaString(argument.text);
+
+    if (ref === null) continue;
     matches.push({
       start: callee.span.start,
       end: close.span.end,
-      ref: argument.string_value,
+      ref,
       idSpan: argument.span,
     });
   }
