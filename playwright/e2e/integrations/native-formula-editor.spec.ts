@@ -436,8 +436,10 @@ test('real native tokens recognize complete prop calls while syntax errors still
     chips?: string[];
     invalid?: boolean;
     unterminatedString?: boolean;
+    invalidEscape?: string;
+    stringsBeforeError?: string[];
   }> = [
-    { source: '["price", format(prop("price"))]', refs: ['price'] },
+    { source: '["price", format(prop("price"))]', refs: ['price'], invalid: false },
     { source: '"😀" + prop /*before*/ ( /*inside*/ "price" /*after*/ )', refs: ['price'] },
     { source: 'prop(\n/* inside */ "price"\n)', refs: ['price'], chips: [] },
     { source: '/* prop("price") */ "prop(\\"price\\")"', refs: [] },
@@ -455,19 +457,42 @@ test('real native tokens recognize complete prop calls while syntax errors still
     { source: 'prop("price)', refs: [], invalid: true, unterminatedString: true },
     { source: "prop('price')", refs: [], invalid: true },
     { source: 'prop("price\')', refs: [], invalid: true, unterminatedString: true },
-    { source: 'prop("price\\)', refs: [], invalid: true, unterminatedString: true },
+    { source: 'prop("price\\)', refs: [], invalid: true, invalidEscape: String.raw`\)` },
     { source: 'prop("price\\', refs: [], invalid: true, unterminatedString: true },
-    { source: String.raw`prop("bad\q")`, refs: ['badq'], invalid: true },
+    { source: String.raw`prop("bad\q")`, refs: [], invalid: true, invalidEscape: String.raw`\q` },
     { source: String.raw`prop("bad\\q")`, refs: [String.raw`bad\q`], invalid: true },
-    { source: String.raw`prop("bad\u0061")`, refs: ['badu0061'], invalid: true },
-    { source: String.raw`prop("bad\r")`, refs: ['badr'], invalid: true },
-    { source: String.raw`prop("bad\'")`, refs: ["bad'"], invalid: true },
-    { source: String.raw`prop("\price")`, refs: ['price'], invalid: false },
+    { source: String.raw`prop("bad\u0061")`, refs: [], invalid: true, invalidEscape: String.raw`\u` },
+    { source: String.raw`prop("bad\r")`, refs: [], invalid: true, invalidEscape: String.raw`\r` },
+    { source: String.raw`prop("bad\'")`, refs: [], invalid: true, invalidEscape: String.raw`\'` },
+    { source: String.raw`prop("\price")`, refs: [], invalid: true, invalidEscape: String.raw`\p` },
+    { source: String.raw`prop("bad\q" "price")`, refs: [], invalid: true, invalidEscape: String.raw`\q` },
+    {
+      source: String.raw`prop("price") + prop("bad\q") + prop("Quantity")`,
+      refs: ['price'],
+      invalid: true,
+      invalidEscape: String.raw`\q`,
+      stringsBeforeError: ['"price"'],
+    },
+    {
+      source: String.raw`"😀" + prop("bad\😀") + prop("price")`,
+      refs: [],
+      invalid: true,
+      invalidEscape: String.raw`\😀`,
+      stringsBeforeError: ['"😀"'],
+    },
     { source: '"x" /* receiver */ . /* member */ prop("price")', refs: [], invalid: true },
     { source: 'prop("price").prop("other")', refs: ['price'], invalid: true },
   ];
 
-  for (const { source, refs, chips = refs, invalid, unterminatedString } of cases) {
+  for (const {
+    source,
+    refs,
+    chips = refs,
+    invalid,
+    unterminatedString,
+    invalidEscape,
+    stringsBeforeError = [],
+  } of cases) {
     const inspection = await inspectExpression(page, source);
     const workerState = (await evidence(page)).replies
       .filter((reply) => reply.method === 'draft.getState')
@@ -502,6 +527,37 @@ test('real native tokens recognize complete prop calls while syntax errors still
       );
     }
 
+    if (invalidEscape) {
+      const escapeStart = source.indexOf(invalidEscape);
+      const lexerDiagnostic = expect.arrayContaining([
+        expect.objectContaining({
+          message: `invalid escape sequence '${invalidEscape}'`,
+          span: { start: escapeStart, end: escapeStart + invalidEscape.length },
+        }),
+      ]);
+      const propertyDiagnostic = expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringMatching(/^Unknown property:/) }),
+      ]);
+      const eof = { kind: 'Eof', text: '', span: { start: source.length, end: source.length } };
+
+      expect(inspection.diagnostics, source).toEqual(lexerDiagnostic);
+      expect(workerState?.diagnostics, source).toEqual(lexerDiagnostic);
+      expect(inspection.diagnostics, source).not.toEqual(propertyDiagnostic);
+      expect(workerState?.diagnostics, source).not.toEqual(propertyDiagnostic);
+      expect(inspection.tokens.filter(({ kind }) => kind === 'String').map(({ text }) => text), source).toEqual(
+        stringsBeforeError
+      );
+      expect(workerState?.tokens.filter(({ kind }) => kind === 'String').map(({ text }) => text), source).toEqual(
+        stringsBeforeError
+      );
+      expect(
+        inspection.tokens.filter(({ kind }) => kind !== 'Eof').every(({ span }) => span.end <= escapeStart),
+        source
+      ).toBe(true);
+      expect(inspection.tokens.at(-1), source).toEqual(eof);
+      expect(workerState?.tokens.at(-1), source).toEqual(eof);
+    }
+
     expect(
       inspection.references.map((reference) => reference.ref),
       source
@@ -527,6 +583,10 @@ test('real native tokens recognize complete prop calls while syntax errors still
     if (invalid) {
       expect(inspection.diagnostics.length, source).toBeGreaterThan(0);
       await expect(page.getByTestId('formula-editor-done'), source).toBeDisabled();
+      if (invalidEscape) {
+        await expect(page.getByTestId('formula-editor-error'), source).toBeVisible();
+        await expect(page.getByTestId('formula-editor-error'), source).not.toContainText('Unknown property:');
+      }
     } else if (invalid === false) {
       expect(inspection.diagnostics, source).toEqual([]);
       await expect(page.getByTestId('formula-editor-done'), source).toBeEnabled();
@@ -534,25 +594,52 @@ test('real native tokens recognize complete prop calls while syntax errors still
   }
 });
 
-test('identity escapes bind distinct property names and preserve literal backslashes', async ({ page }) => {
+test('illegal source escapes never bind while encoded backslash names save and reload', async ({ page }) => {
   const input = page.getByTestId('formula-editor-input');
+  const saved = page.getByTestId('saved-expression');
+  const original = await saved.innerText();
 
-  await page.evaluate(() => {
+  const { nameLiteral, idLiteral } = await page.evaluate(() => {
     const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
+    const id = String.raw`literal-\q`;
+    const name = String.raw`bad\q`;
 
-    fixture.addTextProperty('q-id', 'badq', 'identity');
-    fixture.addTextProperty(String.raw`literal-\q`, String.raw`bad\q`, 'backslash');
+    fixture.addTextProperty('q-id', 'badq', 'plain');
+    fixture.addTextProperty(id, name, 'backslash');
+    return { nameLiteral: fixture.encodeFormulaString(name), idLiteral: fixture.encodeFormulaString(id) };
   });
-  const source = String.raw`["bad\q", "bad\\q", prop("bad\q"), prop("bad\\q")].join("|")`;
-  const canonical = String.raw`["bad\q", "bad\\q", prop("q-id"), prop("literal-\\q")].join("|")`;
+  const illegal = String.raw`prop("bad\q")`;
+  const rejected = await inspectExpression(page, illegal);
+
+  expect(rejected.diagnostics).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ message: String.raw`invalid escape sequence '\q'`, span: { start: 9, end: 11 } }),
+    ])
+  );
+  expect(rejected.diagnostics).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ message: expect.stringMatching(/^Unknown property:/) })])
+  );
+  expect(rejected.tokens.some(({ kind }) => kind === 'String')).toBe(false);
+  expect(rejected.references).toEqual([]);
+  await replaceSource(input, '');
+  await pasteSource(input, illegal);
+  await expect(input).toHaveAttribute('data-value', illegal);
+  await expect(page.getByTestId('formula-token')).toHaveCount(0);
+  await expect(page.getByTestId('formula-editor-error')).toBeVisible();
+  await expect(page.getByTestId('formula-editor-error')).not.toContainText('Unknown property:');
+  await expect(page.getByTestId('formula-editor-done')).toBeDisabled();
+  await input.press('ControlOrMeta+Enter');
+  await expect(saved).toHaveText(original);
+  const source = `[${nameLiteral}, prop(${nameLiteral})].join("|")`;
+  const canonical = `[${nameLiteral}, prop(${idLiteral})].join("|")`;
   const inspection = await inspectExpression(page, source);
 
-  expect(inspection.references.map((reference) => reference.ref)).toEqual(['badq', String.raw`bad\q`]);
+  expect(nameLiteral).toBe(String.raw`"bad\\q"`);
+  expect(idLiteral).toBe(String.raw`"literal-\\q"`);
+  expect(inspection.references.map((reference) => reference.ref)).toEqual([String.raw`bad\q`]);
   expect(inspection.tokens.filter((token) => token.kind === 'String').map((token) => token.text)).toEqual([
-    String.raw`"bad\q"`,
-    String.raw`"bad\\q"`,
-    String.raw`"bad\q"`,
-    String.raw`"bad\\q"`,
+    nameLiteral,
+    nameLiteral,
     '"|"',
   ]);
   await replaceSource(input, '');
@@ -562,21 +649,21 @@ test('identity escapes bind distinct property names and preserve literal backsla
     .poll(() =>
       page.getByTestId('formula-token').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-ref')))
     )
-    .toEqual(['q-id', String.raw`literal-\q`]);
-  await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`badq|bad\q|identity|backslash`);
+    .toEqual([String.raw`literal-\q`]);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`bad\q|backslash`);
   await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
   const bound = await inspectExpression(page, canonical);
 
   expect(bound.diagnostics).toEqual([]);
-  expect(bound.display).toBe(String.raw`["bad\q", "bad\\q", prop("badq"), prop("bad\\q")].join("|")`);
+  expect(bound.display).toBe(source);
   await input.press('ControlOrMeta+a');
   expect(await copySelection(input)).toBe(canonical);
   await page.getByTestId('formula-editor-done').click();
-  await expect(page.getByTestId('saved-expression')).toHaveText(canonical);
+  await expect(saved).toHaveText(canonical);
   await page.getByRole('button', { name: 'Open editor', exact: true }).click();
   await expect(input).toHaveAttribute('data-value', canonical);
-  await expect(page.getByTestId('formula-token')).toHaveCount(2);
-  await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`badq|bad\q|identity|backslash`);
+  await expect(page.getByTestId('formula-token')).toHaveCount(1);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`bad\q|backslash`);
 });
 
 test('escaped property literals bind only arguments and round-trip through rename, docs, clipboard and undo', async ({
