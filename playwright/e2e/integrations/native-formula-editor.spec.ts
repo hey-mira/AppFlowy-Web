@@ -461,7 +461,7 @@ test('real native tokens recognize complete prop calls while syntax errors still
     { source: 'prop("price\\', refs: [], invalid: true, unterminatedString: true },
     { source: String.raw`prop("bad\q")`, refs: [], invalid: true, invalidEscape: String.raw`\q` },
     { source: String.raw`prop("bad\\q")`, refs: [String.raw`bad\q`], invalid: true },
-    { source: String.raw`prop("bad\u0061")`, refs: [], invalid: true, invalidEscape: String.raw`\u` },
+    { source: String.raw`prop("bad\u0061")`, refs: [], invalid: true, invalidEscape: '\\u' },
     { source: String.raw`prop("bad\r")`, refs: [], invalid: true, invalidEscape: String.raw`\r` },
     { source: String.raw`prop("bad\'")`, refs: [], invalid: true, invalidEscape: String.raw`\'` },
     { source: String.raw`prop("\price")`, refs: [], invalid: true, invalidEscape: String.raw`\p` },
