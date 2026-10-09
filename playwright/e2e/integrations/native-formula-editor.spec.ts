@@ -530,9 +530,11 @@ test('identity escapes bind distinct property names and preserve literal backsla
   await replaceSource(input, '');
   await pasteSource(input, source);
   await expect(input).toHaveAttribute('data-value', canonical);
-  expect(
-    await page.getByTestId('formula-token').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-ref')))
-  ).toEqual(['q-id', String.raw`literal-\q`]);
+  await expect
+    .poll(() =>
+      page.getByTestId('formula-token').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-ref')))
+    )
+    .toEqual(['q-id', String.raw`literal-\q`]);
   await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`badq|bad\q|identity|backslash`);
   await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
   const bound = await inspectExpression(page, canonical);
