@@ -11,6 +11,12 @@ import { DatabaseHistoryPreview } from '../DatabaseHistoryPreviewProvider';
 
 jest.mock('lodash-es', () => jest.requireActual('lodash'));
 
+// These non-formula snapshots must never mount formula editing controls.
+jest.mock('@/components/database/components/property/formula/FormulaPropertyMenuContent', () => ({
+  __esModule: true,
+  default: () => { throw new Error('Historical preview mounted formula editing controls'); },
+}));
+
 // jsdom has no element measurements; render every fixture row/column while
 // retaining the real Grid row, cell, DnD, and read-only implementations.
 jest.mock('@/components/database/components/grid/grid-table/useGridVirtualizer', () => ({

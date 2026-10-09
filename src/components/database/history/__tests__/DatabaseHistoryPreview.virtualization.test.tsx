@@ -14,6 +14,13 @@ import { DatabaseHistoryPreview } from '../DatabaseHistoryPreviewProvider';
 // Keep the actual grid, useGridVirtualizer, and TanStack implementation. Only
 // browser layout/observer APIs absent from jsdom receive deterministic geometry.
 jest.mock('lodash-es', () => jest.requireActual('lodash'));
+
+// These non-formula snapshots must never mount formula editing controls.
+jest.mock('@/components/database/components/property/formula/FormulaPropertyMenuContent', () => ({
+  __esModule: true,
+  default: () => { throw new Error('Historical preview mounted formula editing controls'); },
+}));
+
 jest.mock('preact', () => jest.requireActual(require.resolve('preact').replace('preact.module.js', 'preact.js')));
 jest.mock('preact/hooks', () => jest.requireActual(require.resolve('preact/hooks').replace('hooks.module.js', 'hooks.js')));
 jest.mock('preact/compat', () => jest.requireActual(require.resolve('preact/compat').replace('compat.module.js', 'compat.js')));
