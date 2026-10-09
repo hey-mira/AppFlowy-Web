@@ -256,7 +256,8 @@ function selectOutsideTokens(editor: Editor) {
 
 /** Inserts plain source at the selection; new lines split the line. */
 export function insertSource(editor: Editor, text: string) {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  // CR can be literal data; LF separates Slate lines.
+  const lines = text.split('\n');
 
   selectOutsideTokens(editor);
   Editor.withoutNormalizing(editor, () => {

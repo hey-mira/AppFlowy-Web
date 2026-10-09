@@ -411,7 +411,7 @@ test('native token source distinguishes strings and multiline comments', async (
   await pasteSource(input, source);
   await expect(input).toHaveAttribute(
     'data-value',
-    source.replace(/\r\n/g, '\n').replace('/* keep */ "Price"', '/* keep */ "price"')
+    source.replace('/* keep */ "Price"', '/* keep */ "price"')
   );
   await expect(page.getByTestId('formula-token')).toHaveCount(1);
   await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', 'price');
@@ -665,6 +665,83 @@ test('illegal source escapes never bind while encoded backslash names save and r
   await expect(page.getByTestId('formula-token')).toHaveCount(1);
   await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`bad\q|backslash`);
 });
+
+for (const { label, control } of [
+  { label: 'CR', control: '\r' },
+  { label: 'CRLF', control: '\r\n' },
+]) {
+  test(`pasted encoded ${label} literals preserve their source and value`, async ({ page }, testInfo) => {
+    const input = page.getByTestId('formula-editor-input');
+    const value = `a${control}b`;
+    const literal = await page.evaluate(
+      (value) => (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture.encodeFormulaString(value),
+      value
+    );
+    const inspection = await inspectExpression(page, literal);
+
+    expect(inspection.diagnostics).toEqual([]);
+    expect(inspection.tokens.find(({ kind }) => kind === 'String')?.text).toBe(literal);
+    await replaceSource(input, '');
+    await pasteSource(input, literal);
+    await expect(input).not.toHaveAttribute('data-value', '');
+    const inserted = await input.getAttribute('data-value');
+    const json = testInfo.outputPath('raw-cr-insertion.json');
+
+    await writeFile(json, JSON.stringify({ label, value, literal, inspection, inserted }, null, 2));
+    await testInfo.attach('raw-cr-insertion.json', { path: json, contentType: 'application/json' });
+    await expect(input).toHaveAttribute('data-value', literal);
+    await expect.poll(() => page.getByTestId('formula-preview-value').textContent()).toBe(value);
+    await input.press('ControlOrMeta+a');
+    expect(await copySelection(input)).toBe(literal);
+    await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+    await page.getByTestId('formula-editor-done').click();
+    await expect.poll(() => page.getByTestId('saved-expression').textContent()).toBe(literal);
+    await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+    await expect(input).toHaveAttribute('data-value', literal);
+    await expect.poll(() => page.getByTestId('formula-preview-value').textContent()).toBe(value);
+  });
+
+  test(`native property binding preserves ${label} in the stable ID`, async ({ page }, testInfo) => {
+    const input = page.getByTestId('formula-editor-input');
+    const id = `field${control}id`;
+    const name = `Raw ${label} property`;
+    const { idLiteral, nameLiteral } = await page.evaluate(
+      ({ id, name }) => {
+        const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
+
+        fixture.addTextProperty(id, name, 'found');
+        return { idLiteral: fixture.encodeFormulaString(id), nameLiteral: fixture.encodeFormulaString(name) };
+      },
+      { id, name }
+    );
+    const source = `prop(${nameLiteral})`;
+    const canonical = `prop(${idLiteral})`;
+    const inspection = await inspectExpression(page, canonical);
+
+    expect(inspection.diagnostics).toEqual([]);
+    expect(inspection.references.map(({ ref }) => ref)).toEqual([id]);
+    await replaceSource(input, '');
+    await pasteSource(input, source);
+    await expect.poll(() => input.getAttribute('data-value')).not.toBe(source);
+    const inserted = await input.getAttribute('data-value');
+    const json = testInfo.outputPath('raw-cr-insertion.json');
+
+    await writeFile(json, JSON.stringify({ label, id, name, source, canonical, inspection, inserted }, null, 2));
+    await testInfo.attach('raw-cr-insertion.json', { path: json, contentType: 'application/json' });
+    await expect(input).toHaveAttribute('data-value', canonical);
+    await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', id);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('found');
+    await input.press('ControlOrMeta+a');
+    expect(await copySelection(input)).toBe(canonical);
+    await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+    await page.getByTestId('formula-editor-done').click();
+    await expect.poll(() => page.getByTestId('saved-expression').textContent()).toBe(canonical);
+    await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+    await expect(input).toHaveAttribute('data-value', canonical);
+    await expect(page.getByTestId('formula-token')).toHaveAttribute('data-ref', id);
+    await expect(page.getByTestId('formula-preview-value')).toHaveText('found');
+  });
+}
 
 test('escaped property literals bind only arguments and round-trip through rename, docs, clipboard and undo', async ({
   page,

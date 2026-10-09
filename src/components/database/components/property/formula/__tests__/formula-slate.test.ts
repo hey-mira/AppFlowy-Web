@@ -1,3 +1,4 @@
+import { encodeFormulaString } from '@notion-formula/sdk';
 import { createEditor, Editor, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 
@@ -43,9 +44,9 @@ const referenceFixtures: Record<string, Array<[number, number]>> = {
   'upper(prop("Name"))': [[6, 18]],
   '1 + prop("Price") + 2': [[4, 17]],
   'max(prop("Price"), 3)': [[4, 17]],
-  'prop("Price") +\n prop("Amount")\n2': [
+  'prop("Price") +\r\n prop("Amount")\r2': [
     [0, 13],
-    [17, 31],
+    [18, 32],
   ],
   'prop("Price") + prop("Amount")': [
     [0, 13],
@@ -303,13 +304,33 @@ describe('formula copy and paste', () => {
     expect(selectionOffsets(to)).toEqual({ start: 17, end: 17 });
   });
 
-  it('turns Windows line endings into lines', () => {
+  it('preserves Windows source while LF separates lines', () => {
     const editor = pasteEditor();
+    const source = 'prop("Price") +\r\n prop("Amount")\r2';
 
-    paste(editor, 'prop("Price") +\r\n prop("Amount")\r2');
-    expect(editorSource(editor)).toBe('prop("Price") +\n prop("Amount")\n2');
-    expect(editor.children).toHaveLength(3);
+    paste(editor, source);
+    expect(editorSource(editor)).toBe(source);
+    expect(editor.children).toHaveLength(2);
     expect(tokens(editor)).toHaveLength(2);
+  });
+
+  it.each([
+    ['CR', '\r'],
+    ['CRLF', '\r\n'],
+  ])('preserves encoded %s literals in paste and native replacements', (_, control) => {
+    const literal = encodeFormulaString(`a${control}b`);
+    const pasted = pasteEditor();
+
+    paste(pasted, literal);
+    expect(editorSource(pasted)).toBe(literal);
+    expect(selectionOffsets(pasted)).toEqual({ start: literal.length, end: literal.length });
+    expect(copyAll(pasted)).toBe(literal);
+    const original = 'prop("Unbound")';
+    const edited = makeEditor(original);
+
+    replaceSourceRange(edited, 5, original.length - 1, literal, literal.length);
+    expect(editorSource(edited)).toBe(`prop(${literal})`);
+    expect(selectionOffsets(edited)).toEqual({ start: 5 + literal.length, end: 5 + literal.length });
   });
 
   it('replaces a selection that covers tokens', () => {
