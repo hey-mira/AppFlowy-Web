@@ -430,7 +430,13 @@ test('native token source distinguishes strings and multiline comments', async (
 
 test('real native tokens recognize complete prop calls while syntax errors still block saving', async ({ page }) => {
   const input = page.getByTestId('formula-editor-input');
-  const cases: Array<{ source: string; refs: string[]; chips?: string[]; invalid?: boolean }> = [
+  const cases: Array<{
+    source: string;
+    refs: string[];
+    chips?: string[];
+    invalid?: boolean;
+    unterminatedString?: boolean;
+  }> = [
     { source: '["price", format(prop("price"))]', refs: ['price'] },
     { source: '"😀" + prop /*before*/ ( /*inside*/ "price" /*after*/ )', refs: ['price'] },
     { source: 'prop(\n/* inside */ "price"\n)', refs: ['price'], chips: [] },
@@ -445,11 +451,12 @@ test('real native tokens recognize complete prop calls while syntax errors still
     { source: 'prop("price", "quantity")', refs: [], invalid: true },
     { source: 'prop("price" + "")', refs: [], invalid: true },
     { source: 'prop()', refs: [], invalid: true },
-    { source: 'prop("price"', refs: [], invalid: true },
-    { source: 'prop("price)', refs: [], invalid: true },
+    { source: 'prop("price"', refs: [], invalid: true, unterminatedString: false },
+    { source: 'prop("price)', refs: [], invalid: true, unterminatedString: true },
     { source: "prop('price')", refs: [], invalid: true },
-    { source: 'prop("price\')', refs: [], invalid: true },
-    { source: 'prop("price\\)', refs: [], invalid: true },
+    { source: 'prop("price\')', refs: [], invalid: true, unterminatedString: true },
+    { source: 'prop("price\\)', refs: [], invalid: true, unterminatedString: true },
+    { source: 'prop("price\\', refs: [], invalid: true, unterminatedString: true },
     { source: String.raw`prop("bad\q")`, refs: ['badq'], invalid: true },
     { source: String.raw`prop("bad\\q")`, refs: [String.raw`bad\q`], invalid: true },
     { source: String.raw`prop("bad\u0061")`, refs: ['badu0061'], invalid: true },
@@ -460,11 +467,13 @@ test('real native tokens recognize complete prop calls while syntax errors still
     { source: 'prop("price").prop("other")', refs: ['price'], invalid: true },
   ];
 
-  for (const { source, refs, chips = refs, invalid } of cases) {
+  for (const { source, refs, chips = refs, invalid, unterminatedString } of cases) {
     const inspection = await inspectExpression(page, source);
     const workerState = (await evidence(page)).replies
       .filter((reply) => reply.method === 'draft.getState')
-      .map((reply) => reply.value as { definition: { expression: string }; tokens: Token[] })
+      .map(
+        (reply) => reply.value as { definition: { expression: string }; tokens: Token[]; diagnostics: unknown[] }
+      )
       .reverse()
       .find((state) => state.definition.expression === source);
 
@@ -472,6 +481,25 @@ test('real native tokens recognize complete prop calls while syntax errors still
     for (const token of workerState?.tokens ?? []) {
       expect(Object.keys(token).sort(), source).toEqual(['kind', 'span', 'text']);
       expect(token.text, source).toBe(source.slice(token.span.start, token.span.end));
+    }
+
+    if (unterminatedString) {
+      const unterminatedDiagnostic = expect.arrayContaining([
+        expect.objectContaining({
+          message: 'unterminated string literal',
+          span: { start: source.indexOf('"'), end: source.length },
+        }),
+      ]);
+
+      expect(inspection.diagnostics, source).toEqual(unterminatedDiagnostic);
+      expect(workerState?.diagnostics, source).toEqual(unterminatedDiagnostic);
+      expect(inspection.tokens.some(({ kind }) => kind === 'String'), source).toBe(false);
+      expect(workerState?.tokens.some(({ kind }) => kind === 'String'), source).toBe(false);
+    } else if (unterminatedString === false) {
+      expect(inspection.tokens.some(({ kind }) => kind === 'String'), source).toBe(true);
+      expect(inspection.diagnostics, source).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ message: 'unterminated string literal' })])
+      );
     }
 
     expect(
