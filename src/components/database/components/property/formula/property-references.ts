@@ -50,7 +50,6 @@ export function findPropReferences(source: string, tokens: Token[]): FormulaProp
       continue;
     const ref = decodeFormulaString(argument.text);
 
-    if (ref === null) continue;
     matches.push({
       start: callee.span.start,
       end: close.span.end,

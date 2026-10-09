@@ -1,4 +1,4 @@
-import { quoteFormulaString } from '@notion-formula/sdk';
+import { encodeFormulaString } from '@notion-formula/sdk';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -20,7 +20,7 @@ function Snippet({ source }: { source: string }) {
 }
 
 function propertyExamples(entry: FormulaFieldSchema, _schema: FormulaFieldSchema[]): FormulaFunctionExample[] {
-  const ref = `prop(${quoteFormulaString(entry.id)})`;
+  const ref = `prop(${encodeFormulaString(entry.id)})`;
   const type = entry.type === FieldType.Formula ? undefined : formulaTypeOfField(entry);
 
   if (entry.type === FieldType.Checklist) {
@@ -110,7 +110,7 @@ function FormulaDocsPanelContent({
           <span className={'truncate'}>{item.entry.name}</span>
         </span>
       );
-      signature = `prop(${quoteFormulaString(item.entry.name)})`;
+      signature = `prop(${encodeFormulaString(item.entry.name)})`;
       description = t('grid.formula.propertyDescription', {
         defaultValue: 'Property of type {{type}}.',
         type,

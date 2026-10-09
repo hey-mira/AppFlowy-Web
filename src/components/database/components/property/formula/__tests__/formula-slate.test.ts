@@ -66,6 +66,8 @@ const referenceFixtures: Record<string, Array<[number, number]>> = {
   ],
   'pi() * prop("Amount") ^ 2': [[7, 21]],
   '1\n+ prop("Price") * 2': [[4, 17]],
+  [String.raw`prop("bad\q")`]: [[0, 13]],
+  [String.raw`prop("bad\\q")`]: [[0, 14]],
 };
 
 function nativeTokens(source: string): Token[] {
@@ -110,6 +112,24 @@ describe('formula slate document', () => {
 
     expect(editorSource(editor)).toBe(source);
     expect(tokens(editor).map((token) => token.ref)).toEqual(['Done', 'Price']);
+  });
+
+  it.each([
+    [String.raw`prop("bad\q")`, 'badq'],
+    [String.raw`prop("bad\\q")`, String.raw`bad\q`],
+  ])('preserves raw source while decoding the token reference in %s', (source, ref) => {
+    const editor = makeEditor(source);
+
+    expect(editorSource(editor)).toBe(source);
+    expect(tokens(editor).map((token) => ({ ref: token.ref, source: token.source }))).toEqual([{ ref, source }]);
+    expect(selectionOffsets(editor)).toEqual({ start: source.length, end: source.length });
+    Transforms.select(editor, []);
+    expect(selectedSource(editor)).toBe(source);
+    Editor.deleteFragment(editor);
+    expect(editorSource(editor)).toBe('');
+    editor.undo();
+    expect(editorSource(editor)).toBe(source);
+    expect(tokens(editor).map((token) => token.ref)).toEqual([ref]);
   });
 
   it('deletes a token as one unit with Backspace', () => {

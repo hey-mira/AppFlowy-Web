@@ -49,7 +49,7 @@ type TokenInspection = {
 
 type TokenEditorFixture = {
   inspectExpression: (expression: string, source?: string) => Promise<TokenInspection>;
-  quoteFormulaString: (value: string) => string;
+  encodeFormulaString: (value: string) => string;
   addTextProperty: (id: string, name: string, value: string) => void;
   holdNextReply: (method: string) => void;
   setSavedExpression: (expression: string) => void;
@@ -450,9 +450,12 @@ test('real native tokens recognize complete prop calls while syntax errors still
     { source: "prop('price')", refs: [], invalid: true },
     { source: 'prop("price\')', refs: [], invalid: true },
     { source: 'prop("price\\)', refs: [], invalid: true },
-    { source: String.raw`prop("bad\q")`, refs: [], invalid: true },
-    { source: String.raw`prop("bad\u0061")`, refs: [], invalid: true },
-    { source: String.raw`prop("bad\'")`, refs: [], invalid: true },
+    { source: String.raw`prop("bad\q")`, refs: ['badq'], invalid: true },
+    { source: String.raw`prop("bad\\q")`, refs: [String.raw`bad\q`], invalid: true },
+    { source: String.raw`prop("bad\u0061")`, refs: ['badu0061'], invalid: true },
+    { source: String.raw`prop("bad\r")`, refs: ['badr'], invalid: true },
+    { source: String.raw`prop("bad\'")`, refs: ["bad'"], invalid: true },
+    { source: String.raw`prop("\price")`, refs: ['price'], invalid: false },
     { source: '"x" /* receiver */ . /* member */ prop("price")', refs: [], invalid: true },
     { source: 'prop("price").prop("other")', refs: ['price'], invalid: true },
   ];
@@ -496,8 +499,54 @@ test('real native tokens recognize complete prop calls while syntax errors still
     if (invalid) {
       expect(inspection.diagnostics.length, source).toBeGreaterThan(0);
       await expect(page.getByTestId('formula-editor-done'), source).toBeDisabled();
+    } else if (invalid === false) {
+      expect(inspection.diagnostics, source).toEqual([]);
+      await expect(page.getByTestId('formula-editor-done'), source).toBeEnabled();
     }
   }
+});
+
+test('identity escapes bind distinct property names and preserve literal backslashes', async ({ page }) => {
+  const input = page.getByTestId('formula-editor-input');
+
+  await page.evaluate(() => {
+    const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
+
+    fixture.addTextProperty('q-id', 'badq', 'identity');
+    fixture.addTextProperty(String.raw`literal-\q`, String.raw`bad\q`, 'backslash');
+  });
+  const source = String.raw`["bad\q", "bad\\q", prop("bad\q"), prop("bad\\q")].join("|")`;
+  const canonical = String.raw`["bad\q", "bad\\q", prop("q-id"), prop("literal-\\q")].join("|")`;
+  const inspection = await inspectExpression(page, source);
+
+  expect(inspection.references.map((reference) => reference.ref)).toEqual(['badq', String.raw`bad\q`]);
+  expect(inspection.tokens.filter((token) => token.kind === 'String').map((token) => token.text)).toEqual([
+    String.raw`"bad\q"`,
+    String.raw`"bad\\q"`,
+    String.raw`"bad\q"`,
+    String.raw`"bad\\q"`,
+    '"|"',
+  ]);
+  await replaceSource(input, '');
+  await pasteSource(input, source);
+  await expect(input).toHaveAttribute('data-value', canonical);
+  expect(
+    await page.getByTestId('formula-token').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-ref')))
+  ).toEqual(['q-id', String.raw`literal-\q`]);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`badq|bad\q|identity|backslash`);
+  await expect(page.getByTestId('formula-editor-done')).toBeEnabled();
+  const bound = await inspectExpression(page, canonical);
+
+  expect(bound.diagnostics).toEqual([]);
+  expect(bound.display).toBe(String.raw`["bad\q", "bad\\q", prop("badq"), prop("bad\\q")].join("|")`);
+  await input.press('ControlOrMeta+a');
+  expect(await copySelection(input)).toBe(canonical);
+  await page.getByTestId('formula-editor-done').click();
+  await expect(page.getByTestId('saved-expression')).toHaveText(canonical);
+  await page.getByRole('button', { name: 'Open editor', exact: true }).click();
+  await expect(input).toHaveAttribute('data-value', canonical);
+  await expect(page.getByTestId('formula-token')).toHaveCount(2);
+  await expect(page.getByTestId('formula-preview-value')).toHaveText(String.raw`badq|bad\q|identity|backslash`);
 });
 
 test('escaped property literals bind only arguments and round-trip through rename, docs, clipboard and undo', async ({
@@ -512,7 +561,7 @@ test('escaped property literals bind only arguments and round-trip through renam
       const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
 
       fixture.addTextProperty(id, name, value);
-      return { idLiteral: fixture.quoteFormulaString(id), nameLiteral: fixture.quoteFormulaString(name) };
+      return { idLiteral: fixture.encodeFormulaString(id), nameLiteral: fixture.encodeFormulaString(name) };
     },
     { id, name, value }
   );
@@ -554,7 +603,7 @@ test('escaped property literals bind only arguments and round-trip through renam
       const fixture = (window as unknown as { editorFixture: TokenEditorFixture }).editorFixture;
 
       fixture.fields.get(id)!.set('name', renamed);
-      return fixture.quoteFormulaString(renamed);
+      return fixture.encodeFormulaString(renamed);
     },
     { id, renamed }
   );

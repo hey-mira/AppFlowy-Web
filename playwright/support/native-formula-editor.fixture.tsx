@@ -1,6 +1,6 @@
 import { StrictMode, Suspense, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { quoteFormulaString } from '@notion-formula/sdk';
+import { encodeFormulaString } from '@notion-formula/sdk';
 import * as Y from 'yjs';
 
 import { FormulaCell } from '@/application/database-yjs/cell.type';
@@ -616,7 +616,7 @@ Object.assign(window, {
     rowDocs,
     fields,
     inspectExpression,
-    quoteFormulaString,
+    encodeFormulaString,
     addTextProperty,
     holdNextReply: (method: string) => {
       evidence.holdNext = method;

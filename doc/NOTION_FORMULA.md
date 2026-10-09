@@ -22,8 +22,9 @@ language implementation.
 ## Editor behavior
 
 The editor recognizes complete `prop(String)` calls in the current native token
-snapshot and decodes their arguments on demand with the SDK's synchronous string
-codec. Tokens carry only `kind`, raw source `text`, and `span`.
+snapshot and passes the complete `String` token text to the SDK's synchronous
+`decodeFormulaString`. Host-created literals use `encodeFormulaString`. Tokens
+carry only `kind`, raw source `text`, and `span`.
 
 | Action                                   | Behavior                                                                                                                                                           |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

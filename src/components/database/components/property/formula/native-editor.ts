@@ -1,4 +1,4 @@
-import { quoteFormulaString } from '@notion-formula/sdk';
+import { encodeFormulaString } from '@notion-formula/sdk';
 
 import { FormulaFieldSchema } from '@/application/database-yjs/fields/formula/schema';
 import { nativePropertyDefinition } from '@/application/database-yjs/formula/native-values';
@@ -177,7 +177,7 @@ export function bindNativePropertyNames(state: NativeDraftState, schema: Formula
     const matches = schema.filter((entry) => entry.name === reference.ref);
 
     if (matches.length === 1) {
-      edits.push({ range: reference.idSpan, new_text: quoteFormulaString(matches[0].id) });
+      edits.push({ range: reference.idSpan, new_text: encodeFormulaString(matches[0].id) });
       boundIds.add(matches[0].id);
     } else if (matches.length > 1)
       ambiguous.push(`Property name "${reference.ref}" is ambiguous. Choose a property from the list.`);
@@ -196,7 +196,7 @@ export function displayNativePropertyNames(state: NativeDraftState, schema: Form
 
       if (entry)
         source =
-          source.slice(0, reference.idSpan.start) + quoteFormulaString(entry.name) + source.slice(reference.idSpan.end);
+          source.slice(0, reference.idSpan.start) + encodeFormulaString(entry.name) + source.slice(reference.idSpan.end);
     });
   return source;
 }
